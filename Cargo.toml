@@ -1,0 +1,29 @@
+[package]
+name = "cymatrox-viewer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Rendering + UI
+bevy = "0.19.1"
+bevy_material = "0.19"
+bevy_egui = "0.42.0"
+bevy_panorbit_camera = { version = "0.35", features = ["bevy_egui"] }
+
+# Simulation
+cymatrox = "0.2"
+
+# Audio (voice control)
+cpal = "0.18"
+realfft = "3.5"
+num-complex = "0.4"
+
+# Thread communication
+crossbeam-channel = "0.5"
+
+# Async runtime for cymatrox's GpuContext::new().await
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
