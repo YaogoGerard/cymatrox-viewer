@@ -1,4 +1,5 @@
 use bevy::camera::{visibility::RenderLayers, CameraOutputMode};
+use bevy::log::{debug, error, info};
 use bevy::prelude::*;
 use bevy::render::render_resource::BlendState;
 use bevy_egui::{
@@ -38,19 +39,20 @@ pub struct UiState {
 
 impl Default for UiState {
     fn default() -> Self {
+        // Single source of truth: physical defaults come from the sim module
+        // configs, so the UI and the solver can never drift apart.
+        let p = sim::SimParams::default();
         Self {
-            active_module: Default::default(),
-            frequency_hz: 440.0,
-            // UI amplitude is normalized; each module converts it to its
-            // physical driving unit before calling cymatrox.
-            amplitude: 0.1,
-            drag: 4.0,
-            restitution: 0.6,
-            coupling_k: 5.0e5,
-            fluid_density: 1000.0,
-            fluid_surface_tension: 0.072,
-            fluid_depth: 0.004,
-            fluid_damping: 0.8,
+            active_module: ActiveModule::Granular,
+            frequency_hz: p.frequency_hz,
+            amplitude: p.amplitude,
+            drag: p.drag,
+            restitution: p.restitution,
+            coupling_k: p.coupling_k,
+            fluid_density: p.fluid_density,
+            fluid_surface_tension: p.fluid_surface_tension,
+            fluid_depth: p.fluid_depth,
+            fluid_damping: p.fluid_damping,
             voice_control: false,
             voice_freq: 0.0,
             voice_rms: 0.0,
@@ -84,15 +86,26 @@ pub struct SimState {
     pub fluid_data: Option<Vec<cymatrox::fluid::FluidSurfaceNode>>,
     pub acoustic_data: Option<Vec<cymatrox::acoustic::AcousticPressureNode>>,
     pub status: String,
+    pub error: bool,
 }
 
-/// Values shared by the UI and simulation use normalized amplitude controls.
-/// These scales keep the physical units visible in one place.
-pub const FLUID_AMPLITUDE_MPS2: f32 = 10.0;
-/// Normalized UI amplitude converted to transducer normal velocity.
-pub const ACOUSTIC_AMPLITUDE_MPS: f32 = 0.002;
-/// Normalized UI amplitude converted to plate displacement in metres.
-pub const GRANULAR_AMPLITUDE_M: f32 = 0.001;
+/// Latest-wins parameters inferred from [`UiState`]. Physical unit conversion
+/// lives on the sim side, so this is a straight field copy.
+impl From<&UiState> for sim::SimParams {
+    fn from(state: &UiState) -> Self {
+        Self {
+            frequency_hz: state.frequency_hz,
+            amplitude: state.amplitude,
+            drag: state.drag,
+            restitution: state.restitution,
+            coupling_k: state.coupling_k,
+            fluid_density: state.fluid_density,
+            fluid_surface_tension: state.fluid_surface_tension,
+            fluid_depth: state.fluid_depth,
+            fluid_damping: state.fluid_damping,
+        }
+    }
+}
 
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(0, 210, 190);
 const ACCENT_DIM: egui::Color32 = egui::Color32::from_rgb(0, 140, 130);
@@ -123,7 +136,7 @@ fn main() {
         .insert_resource(UiState::default())
         .insert_resource(SimState::default())
         .insert_resource(PrevModule(ActiveModule::Granular))
-        .insert_resource(FluidDefaultsSet(false))
+        .insert_resource(ModuleDefaultsApplied::default())
         .add_systems(
             Startup,
             (
@@ -198,9 +211,9 @@ fn setup_scene(mut commands: Commands, mut egui_global_settings: ResMut<EguiGlob
 }
 
 fn start_sim(mut commands: Commands) {
-    let (data_rx, params_tx, sim_control) = sim::start_sim_thread();
+    let (data_rx, params_slot, sim_control) = sim::start_sim_thread();
     commands.insert_resource(data_rx);
-    commands.insert_resource(params_tx);
+    commands.insert_resource(params_slot);
     commands.insert_resource(sim_control);
 }
 
@@ -215,11 +228,12 @@ fn poll_voice(voice_rx: Res<VoiceReceiver>, mut ui_state: ResMut<UiState>) {
         ui_state.voice_freq = data.frequency_hz;
         ui_state.voice_rms = data.amplitude;
 
-        if ui_state.voice_control {
-            if data.frequency_hz.is_finite() && data.amplitude.is_finite() {
-                ui_state.frequency_hz = data.frequency_hz.clamp(20.0, 20_000.0);
-                ui_state.amplitude = (data.amplitude * 0.01).clamp(0.00001, 1.0);
-            }
+        if ui_state.voice_control
+            && data.frequency_hz.is_finite()
+            && data.amplitude.is_finite()
+        {
+            ui_state.frequency_hz = data.frequency_hz.clamp(20.0, 20_000.0);
+            ui_state.amplitude = (data.amplitude * 0.01).clamp(0.00001, 1.0);
         }
     }
 }
@@ -228,17 +242,21 @@ fn poll_sim_data(data_rx: Res<sim::SimDataReceiver>, mut sim_state: ResMut<SimSt
     while let Ok(data) = data_rx.rx.try_recv() {
         match data {
             sim::SimData::Granular(frame) => {
-                eprintln!("[poll_sim] granular frame: {} grains", frame.len());
                 sim_state.granular_data = Some(frame);
+                sim_state.error = false;
             }
             sim::SimData::Fluid(frame) => {
                 sim_state.fluid_data = Some(frame);
+                sim_state.error = false;
             }
             sim::SimData::Acoustic(frame) => {
                 sim_state.acoustic_data = Some(frame);
+                sim_state.error = false;
             }
             sim::SimData::Status(status) => {
+                error!("[sim] {status}");
                 sim_state.status = status;
+                sim_state.error = true;
             }
         }
     }
@@ -253,11 +271,11 @@ fn diagnose(
     mut frames: Local<u32>,
 ) {
     *frames += 1;
-    if *frames % 120 != 0 {
+    if !(*frames).is_multiple_of(120) {
         return;
     }
     for cam in &fluid_cams {
-        eprintln!(
+        debug!(
             "[diag] module={:?} fluid_data={} fluid_cam_active={} viewport={:?}",
             ui_state.active_module,
             sim_state.fluid_data.as_ref().map(|d| d.len()).unwrap_or(0),
@@ -272,27 +290,14 @@ fn diagnose(
             .get(&mesh3d.0)
             .map(|m| m.count_vertices())
             .unwrap_or(0);
-        eprintln!("[diag] fluid mesh vertices={}", verts);
+        debug!("[diag] fluid mesh vertices={}", verts);
     }
 }
 
-fn sync_params(ui_state: Res<UiState>, params_tx: Res<sim::SimParamsSender>) {
+fn sync_params(ui_state: Res<UiState>, params_slot: Res<sim::SimParamsSlot>) {
     if ui_state.is_changed() {
-        let params = sim::SimParams {
-            frequency_hz: ui_state.frequency_hz.clamp(20.0, 20_000.0),
-            amplitude: ui_state.amplitude.max(0.0),
-            drag: ui_state.drag,
-            restitution: ui_state.restitution,
-            coupling_k: ui_state.coupling_k,
-            fluid_density: ui_state.fluid_density,
-            fluid_surface_tension: ui_state.fluid_surface_tension,
-            fluid_depth: ui_state.fluid_depth,
-            fluid_damping: ui_state.fluid_damping,
-        };
-        if let Err(crossbeam_channel::TrySendError::Disconnected(_)) = params_tx.tx.try_send(params)
-        {
-            eprintln!("[ui] simulation thread disconnected");
-        }
+        // Latest-wins slot: no bounded channel to overflow and no silent drop.
+        params_slot.set(sim::SimParams::from(&*ui_state));
     }
 }
 
@@ -300,36 +305,41 @@ fn sync_module_switch(
     mut ui_state: ResMut<UiState>,
     sim_control: Res<sim::SimControl>,
     mut prev: ResMut<PrevModule>,
-    mut fluid_setup: ResMut<FluidDefaultsSet>,
+    mut defaults: ResMut<ModuleDefaultsApplied>,
 ) {
     if ui_state.active_module != prev.0 {
-        // Give the fluid module a driving amplitude/frequency matching the
-        // working `fluid_ripples` example (60 Hz, a = 90 m/s^2) so Faraday
-        // ripples grow visibly instead of stagnating below the instability
-        // threshold.
-        if ui_state.active_module == ActiveModule::Fluid && !fluid_setup.0 {
-            eprintln!("[module] applying fluid defaults");
-            ui_state.frequency_hz = 60.0;
-            ui_state.amplitude = 0.20; // x10 => 2.0 m/s^2, stable visible Faraday regime
-            fluid_setup.0 = true;
-        }
-        if ui_state.active_module == ActiveModule::Acoustic {
-            // Acoustic uses a transducer velocity and operates in the
-            // ultrasonic range; do not carry Fluid's 60 Hz settings over.
-            ui_state.frequency_hz = 24_000.0;
-            ui_state.amplitude = 0.20;
+        // Give each module a sensible driving regime the first time it is
+        // opened, without clobbering settings the user later tunes.
+        match ui_state.active_module {
+            ActiveModule::Fluid if !defaults.fluid => {
+                info!("[module] applying fluid defaults");
+                ui_state.frequency_hz = 60.0;
+                ui_state.amplitude = 0.20; // x10 => 2.0 m/s^2 (visible Faraday regime)
+                defaults.fluid = true;
+            }
+            ActiveModule::Acoustic if !defaults.acoustic => {
+                info!("[module] applying acoustic defaults");
+                // Acoustic drives a transducer velocity in the ultrasonic range.
+                ui_state.frequency_hz = 24_000.0;
+                ui_state.amplitude = 0.20;
+                defaults.acoustic = true;
+            }
+            _ => {}
         }
         if let Err(crossbeam_channel::TrySendError::Disconnected(_)) =
             sim_control.switch_tx.try_send(ui_state.active_module)
         {
-            eprintln!("[ui] simulation thread disconnected while switching module");
+            error!("[ui] simulation thread disconnected while switching module");
         }
         prev.0 = ui_state.active_module;
     }
 }
 
 #[derive(Resource, Default)]
-pub struct FluidDefaultsSet(pub bool);
+pub struct ModuleDefaultsApplied {
+    pub fluid: bool,
+    pub acoustic: bool,
+}
 
 fn styled_card(ui: &mut egui::Ui, title: &str, add_body: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
@@ -431,6 +441,30 @@ fn ui_panel(
                     ui.add_space(5.0);
                     ui.separator();
                     ui.add_space(8.0);
+
+                    // Fatal initialization / solver error banner.
+                    if sim_state.error {
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgb(70, 24, 24))
+                            .corner_radius(8)
+                            .inner_margin(egui::Margin::same(10))
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(214, 84, 84)))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new("GPU / simulation error")
+                                        .color(egui::Color32::from_rgb(255, 160, 160))
+                                        .strong(),
+                                );
+                                if !sim_state.status.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&sim_state.status)
+                                            .color(egui::Color32::from_rgb(240, 200, 200))
+                                            .size(11.0),
+                                    );
+                                }
+                            });
+                        ui.add_space(6.0);
+                    }
 
                     // Module selector
                     styled_card(ui, "MODULE", |ui| {
@@ -721,4 +755,21 @@ fn ui_panel(
                 });
         });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panel_width_scales_then_clamps() {
+        let p1000 = responsive_panel_width(1000.0);
+        assert!((p1000 - 300.0).abs() < 1e-4);
+        let p800 = responsive_panel_width(800.0);
+        assert!((p800 - 240.0).abs() < 1e-4);
+        let p500 = responsive_panel_width(500.0);
+        assert!((p500 - 220.0).abs() < 1e-4);
+        let p10000 = responsive_panel_width(10_000.0);
+        assert!((p10000 - 300.0).abs() < 1e-4);
+    }
 }

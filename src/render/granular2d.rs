@@ -106,8 +106,7 @@ pub fn update_granular_particles(
     let mut all_pos: Vec<[f32; 3]> = Vec::with_capacity(COUNT * verts_per as usize);
     let mut all_col: Vec<[f32; 4]> = Vec::with_capacity(COUNT * verts_per as usize);
 
-    for i in 0..COUNT.min(data.len()) {
-        let d = &data[i];
+    for (i, d) in data.iter().take(COUNT).enumerate() {
         // Positions are in [0, plate_size]. Map to [-plate_size/2 * SCALE, +plate_size/2 * SCALE]
         let cx = (d.position[0] - PLATE_SIZE * 0.5) * SCALE;
         let cy = (d.position[1] - PLATE_SIZE * 0.5) * SCALE;

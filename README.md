@@ -1,46 +1,64 @@
-# cymatrox-viewer
+# Cymatrox Viewer
 
-Native desktop app replacing the earlier website plan. `cymatrox` stays
-untouched — this depends on it (`cymatrox = "0.2"`) as an external
-consumer, same as `export-frames/` did for the website.
+Interactive cymatics laboratory written in Rust. Visualizes three wave phenomena powered by the GPU-accelerated [cymatrox](https://github.com/YaogoGerard/cymatrox) simulation crate and rendered in real-time with [Bevy](https://bevyengine.org/).
 
-## Architecture
+## Features
 
-- **egui (via `bevy_egui`)** for UI — runs directly inside Bevy's render
-  pipeline, no separate GUI toolkit/adapter (this replaced an earlier
-  Slint-hosts-Bevy design specifically to avoid a third GPU context).
-- **Bevy** for 3D rendering.
-- **cymatrox** on its own `GpuContext` (wgpu 30), independent of Bevy's
-  render device, driven from a dedicated sim thread.
-- **cpal + realfft** for optional voice control (mic → frequency/amplitude).
-- **crossbeam-channel** connecting the sim thread, audio thread, and Bevy.
+- **Three simulation modes**: Granular (Chladni-like patterns), Fluid (Faraday waves on a circular dish), Acoustic (standing pressure field with transducers).
+- **Real-time rendering**: 2D instanced grains, 3D heightmap with lighting, sparse voxel volume rendering, orbit camera.
+- **Interactive control panel**: egui UI to tweak solver/liquid parameters, frequency and driving amplitude.
+- **Voice control**: optional microphone FFT input to drive frequency and amplitude.
+- **Frame-rate independent pacing**: simulation runs at fixed physics steps per second regardless of render FPS.
+- **Production-ready packaging**: deb/AppImage (Linux), NSIS installer (Windows), DMG (macOS, unsigned). Auto-update via `cargo-packager-updater` using GitHub Releases.
+- **Traced logging**: configurable with `RUST_LOG` (e.g. `RUST_LOG=info,cymatrox_viewer=debug`).
 
-## Status: scaffold and initial integration
+## Building
 
-What's here: the app builds a window, Bevy cameras, an egui control panel,
-three simulation/rendering paths, and optional microphone FFT input. The
-simulation and rendering paths are integrated, but still need production
-hardening and performance profiling.
+```bash
+# Debug build
+cargo build
 
-## Implementation order
+# Release build
+cargo build --release
 
-| # | Task | Status |
-|---|------|--------|
-| 1 | Scaffold `Cargo.toml` + `main.rs` | done |
-| 2 | egui panel + placeholder controls | done |
-| 3 | ~~Slint↔Bevy adapter~~ | dropped — egui runs in-pipeline |
-| 4 | Bevy 3D camera setup | done |
-| 4b | Dual-GPU-context smoke test (Bevy's wgpu + cymatrox's `GpuContext::new()` side by side, no rendering) | **not done — do this before step 6** |
-| 5 | Audio capture + FFT | done (initial) |
-| 6 | cymatrox sim thread | done (initial) |
-| 7 | Granular 2D/3D rendering | done (initial) |
-| 8 | UI ↔ sim callbacks | done (initial) |
-| 9 | Fluid 3D rendering | done (initial) |
-| 10 | Acoustic 3D rendering | done (initial) |
-| 11 | Voice control | done (initial) |
-| 12 | Polish | not started |
+# Run
+cargo run --release
+```
 
-Step 4b was added on top of the original plan — it's the highest-risk
-unknown (two separate wgpu devices, one process, likely an integrated
-GPU) and cheap to test in isolation before building three more layers
-on top of it.
+## GPU dual-context smoke test
+
+Validates that cymatrox and Bevy can both initialize their own wgpu devices in the same process (step 4b from the plan).
+
+```bash
+cargo run --bin gpu_smoke
+```
+
+## Tests
+
+```bash
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+## Packaging & Releases
+
+Packaging is configured via [`Packager.toml`](./Packager.toml) and [`cargo-packager`](https://github.com/crabnebula-dev/cargo-packager). On tagged releases (`v*.*.*`), the GitHub Actions workflow builds for Linux (deb/AppImage), Windows (NSIS), and macOS (x86_64 + aarch64, DMG unsigned).
+
+Auto-update uses `cargo-packager-updater` pointing to `https://github.com/YaogoGerard/cymatrox-viewer/releases/latest/download/latest.json`. On Windows/macOS/Linux (AppImage), the updater can download and install updates automatically; `.deb` packages are installed via the system package manager.
+
+## macOS note
+
+The DMG builds are **unsigned**. On first launch, right-click the app and choose "Open" to bypass Gatekeeper.
+
+## Logging
+
+Override default filters with the `RUST_LOG` environment variable (same syntax as `env_logger`/`tracing_subscriber`).
+
+```bash
+RUST_LOG=warn,cymatrox_viewer=info cargo run --release
+```
+
+## License
+
+MIT OR Apache-2.0

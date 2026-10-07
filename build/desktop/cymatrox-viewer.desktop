@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Cymatrox Viewer
+Exec=cymatrox-viewer
+Type=Application
+Icon=cymatrox-viewer
+Terminal=false
+Categories=Science;Physics;Graphics;
+Comment=Interactive cymatics laboratory
+StartupWMClass=cymatrox-viewer
