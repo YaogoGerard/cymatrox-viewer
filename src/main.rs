@@ -1,9 +1,10 @@
+mod ui;
 use bevy::camera::{visibility::RenderLayers, CameraOutputMode};
 use bevy::log::{debug, error, info};
 use bevy::prelude::*;
 use bevy::render::render_resource::BlendState;
 use bevy_egui::{
-    egui, EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext,
+    EguiGlobalSettings, EguiPlugin, EguiPreUpdateSet, EguiPrimaryContextPass, PrimaryEguiContext,
 };
 use bevy_panorbit_camera::PanOrbitCameraPlugin;
 
@@ -107,17 +108,16 @@ impl From<&UiState> for sim::SimParams {
     }
 }
 
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(0, 210, 190);
-const ACCENT_DIM: egui::Color32 = egui::Color32::from_rgb(0, 140, 130);
-const BG_DARK: egui::Color32 = egui::Color32::from_rgb(18, 18, 30);
-const BG_CARD: egui::Color32 = egui::Color32::from_rgb(28, 28, 44);
-const BG_CARD_HOVER: egui::Color32 = egui::Color32::from_rgb(35, 35, 55);
-const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(140, 140, 160);
-const PANEL_WIDTH: f32 = 300.0;
-const PANEL_MIN_WIDTH: f32 = 220.0;
+pub const PANEL_WIDTH: f32 = ui::theme::PANEL_WIDTH;
+pub const PANEL_MARGIN: f32 = ui::theme::PANEL_MARGIN;
+pub const PANEL_GAP: f32 = ui::theme::PANEL_GAP;
 
+/// Horizontal space reserved on the left for the floating control panel. The
+/// 3D viewport is offset by this amount so it is never hidden behind the panel.
 pub fn responsive_panel_width(window_logical_width: f32) -> f32 {
-    (window_logical_width * 0.30).clamp(PANEL_MIN_WIDTH, PANEL_WIDTH)
+    let available = window_logical_width - PANEL_MARGIN * 2.0;
+    let panel = PANEL_WIDTH.min(available.max(240.0));
+    PANEL_MARGIN + panel + PANEL_GAP
 }
 
 fn main() {
@@ -148,7 +148,13 @@ fn main() {
                 render::acoustic3d::setup_acoustic_scene,
             ),
         )
-        .add_systems(EguiPrimaryContextPass, ui_panel)
+        .add_systems(EguiPrimaryContextPass, ui::panel::ui_panel)
+        // Fonts must be installed before egui's `begin_pass`, otherwise the
+        // custom families aren't bound until the following frame.
+        .add_systems(
+            PreUpdate,
+            ui::fonts::install_once.in_set(EguiPreUpdateSet::ProcessInput),
+        )
         .add_systems(
             Update,
             (
@@ -228,12 +234,8 @@ fn poll_voice(voice_rx: Res<VoiceReceiver>, mut ui_state: ResMut<UiState>) {
         ui_state.voice_freq = data.frequency_hz;
         ui_state.voice_rms = data.amplitude;
 
-        if ui_state.voice_control
-            && data.frequency_hz.is_finite()
-            && data.amplitude.is_finite()
-        {
+        if ui_state.voice_control && data.frequency_hz.is_finite() {
             ui_state.frequency_hz = data.frequency_hz.clamp(20.0, 20_000.0);
-            ui_state.amplitude = (data.amplitude * 0.01).clamp(0.00001, 1.0);
         }
     }
 }
@@ -341,435 +343,23 @@ pub struct ModuleDefaultsApplied {
     pub acoustic: bool,
 }
 
-fn styled_card(ui: &mut egui::Ui, title: &str, add_body: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::new()
-        .fill(BG_CARD)
-        .corner_radius(8)
-        .inner_margin(egui::Margin::same(12))
-        .stroke(egui::Stroke::new(1.0, ACCENT_DIM.linear_multiply(0.3)))
-        .show(ui, |ui| {
-            ui.add_space(2.0);
-            ui.colored_label(ACCENT, title);
-            ui.add_space(4.0);
-            add_body(ui);
-            ui.add_space(2.0);
-        });
-}
-
-fn slider_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
-    text: &str,
-    logarithmic: bool,
-) {
-    ui.label(egui::RichText::new(label).color(TEXT_DIM).size(11.0));
-    let mut slider = egui::Slider::new(value, range).text(text);
-    if logarithmic {
-        slider = slider.logarithmic(true);
-    }
-    ui.add(slider);
-}
-
-fn ui_panel(
-    mut contexts: EguiContexts,
-    mut ui_state: ResMut<UiState>,
-    sim_state: Res<SimState>,
-    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
-) -> Result {
-    if let Some(fps) = diagnostics
-        .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
-        .and_then(|d| d.smoothed())
-    {
-        ui_state.fps = fps as f32;
-    }
-
-    let ctx = contexts.ctx_mut()?;
-    let panel_width = responsive_panel_width(ctx.viewport_rect().width());
-
-    // Dark theme
-    ctx.style_mut_of(egui::Theme::Dark, |style| {
-        style.visuals.dark_mode = true;
-        style.visuals.panel_fill = BG_DARK;
-        style.visuals.window_fill = BG_DARK;
-        style.visuals.widgets.noninteractive.weak_bg_fill = BG_DARK;
-        style.visuals.widgets.noninteractive.bg_fill = BG_CARD;
-        style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT_DIM);
-        style.visuals.widgets.inactive.weak_bg_fill = BG_CARD;
-        style.visuals.widgets.inactive.bg_fill = BG_CARD_HOVER;
-        style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
-        style.visuals.widgets.inactive.weak_bg_fill = BG_CARD;
-        style.visuals.widgets.hovered.weak_bg_fill = ACCENT_DIM;
-        style.visuals.widgets.hovered.bg_fill = ACCENT_DIM;
-        style.visuals.selection.bg_fill = ACCENT.linear_multiply(0.4);
-        style.visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
-        style.spacing.item_spacing = egui::vec2(8.0, 7.0);
-        style.spacing.button_padding = egui::vec2(10.0, 7.0);
-    });
-
-    let mut viewport_ui = egui::Ui::new(
-        ctx.clone(),
-        "viewport".into(),
-        egui::UiBuilder::new()
-            .layer_id(egui::LayerId::background())
-            .max_rect(ctx.viewport_rect()),
-    );
-
-    egui::Panel::left("controls")
-        .resizable(false)
-        .default_size(panel_width)
-        .show(&mut viewport_ui, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.add_space(10.0);
-                    // Title
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("CYMATROX")
-                                .color(ACCENT)
-                                .size(24.0)
-                                .strong(),
-                        );
-                    });
-                    ui.label(
-                        egui::RichText::new("Interactive cymatics laboratory")
-                            .color(TEXT_DIM)
-                            .size(11.0),
-                    );
-                    ui.add_space(5.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-
-                    // Fatal initialization / solver error banner.
-                    if sim_state.error {
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_rgb(70, 24, 24))
-                            .corner_radius(8)
-                            .inner_margin(egui::Margin::same(10))
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(214, 84, 84)))
-                            .show(ui, |ui| {
-                                ui.label(
-                                    egui::RichText::new("GPU / simulation error")
-                                        .color(egui::Color32::from_rgb(255, 160, 160))
-                                        .strong(),
-                                );
-                                if !sim_state.status.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new(&sim_state.status)
-                                            .color(egui::Color32::from_rgb(240, 200, 200))
-                                            .size(11.0),
-                                    );
-                                }
-                            });
-                        ui.add_space(6.0);
-                    }
-
-                    // Module selector
-                    styled_card(ui, "MODULE", |ui| {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "Active: {}",
-                                ui_state.active_module.label()
-                            ))
-                            .color(TEXT_DIM)
-                            .size(11.0),
-                        );
-                        ui.add_space(3.0);
-                        ui.horizontal(|ui| {
-                            for (module, label) in [
-                                (ActiveModule::Granular, "Granular"),
-                                (ActiveModule::Fluid, "Fluid"),
-                                (ActiveModule::Acoustic, "Acoustic"),
-                            ] {
-                                let selected = ui_state.active_module == module;
-                                let btn = egui::Button::new(
-                                    egui::RichText::new(label)
-                                        .color(if selected { BG_DARK } else { TEXT_DIM })
-                                        .size(12.0),
-                                )
-                                .fill(if selected { ACCENT } else { BG_CARD })
-                                .min_size(egui::vec2((ui.available_width() - 16.0) / 3.0, 30.0))
-                                .corner_radius(6.0);
-
-                                if ui.add(btn).clicked() {
-                                    ui_state.active_module = module;
-                                }
-                            }
-                        });
-                    });
-
-                    ui.add_space(6.0);
-
-                    // Driving (always visible)
-                    styled_card(ui, "DRIVING", |ui| {
-                        slider_row(
-                            ui,
-                            "Frequency",
-                            &mut ui_state.frequency_hz,
-                            20.0..=20_000.0,
-                            "Hz",
-                            true,
-                        );
-                        match ui_state.active_module {
-                            ActiveModule::Fluid => {
-                                slider_row(
-                                    ui,
-                                    "Amplitude",
-                                    &mut ui_state.amplitude,
-                                    0.0..=1.0,
-                                    "×10 m/s²",
-                                    false,
-                                );
-                            }
-                            ActiveModule::Acoustic => {
-                                slider_row(
-                                    ui,
-                                    "Amplitude",
-                                    &mut ui_state.amplitude,
-                                    0.0..=1.0,
-                                    "×0.002 m/s",
-                                    false,
-                                );
-                            }
-                            _ => {
-                                slider_row(
-                                    ui,
-                                    "Amplitude",
-                                    &mut ui_state.amplitude,
-                                    0.0..=1.0,
-                                    "×1 mm",
-                                    false,
-                                );
-                            }
-                        }
-                    });
-
-                    ui.add_space(6.0);
-
-                    // Solver (granular only, collapsible)
-                    if ui_state.active_module == ActiveModule::Granular {
-                        egui::CollapsingHeader::new(
-                            egui::RichText::new("SOLVER").color(ACCENT).size(13.0),
-                        )
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            egui::Frame::new()
-                                .fill(BG_CARD)
-                                .corner_radius(8)
-                                .inner_margin(egui::Margin::same(12))
-                                .stroke(egui::Stroke::new(1.0, ACCENT_DIM.linear_multiply(0.3)))
-                                .show(ui, |ui| {
-                                    slider_row(
-                                        ui,
-                                        "Drag",
-                                        &mut ui_state.drag,
-                                        0.0..=20.0,
-                                        "",
-                                        false,
-                                    );
-                                    slider_row(
-                                        ui,
-                                        "Restitution",
-                                        &mut ui_state.restitution,
-                                        0.0..=1.0,
-                                        "",
-                                        false,
-                                    );
-                                    slider_row(
-                                        ui,
-                                        "Coupling",
-                                        &mut ui_state.coupling_k,
-                                        1.0..=1.0e7,
-                                        "N/m",
-                                        true,
-                                    );
-                                });
-                        });
-                        ui.add_space(6.0);
-                    }
-
-                    // Liquid (fluid only, collapsible)
-                    if ui_state.active_module == ActiveModule::Fluid {
-                        egui::CollapsingHeader::new(
-                            egui::RichText::new("LIQUID").color(ACCENT).size(13.0),
-                        )
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            egui::Frame::new()
-                                .fill(BG_CARD)
-                                .corner_radius(8)
-                                .inner_margin(egui::Margin::same(12))
-                                .stroke(egui::Stroke::new(1.0, ACCENT_DIM.linear_multiply(0.3)))
-                                .show(ui, |ui| {
-                                    slider_row(
-                                        ui,
-                                        "Density",
-                                        &mut ui_state.fluid_density,
-                                        800.0..=1500.0,
-                                        "kg/m³",
-                                        false,
-                                    );
-                                    slider_row(
-                                        ui,
-                                        "Surface tension",
-                                        &mut ui_state.fluid_surface_tension,
-                                        0.01..=0.5,
-                                        "N/m",
-                                        false,
-                                    );
-                                    slider_row(
-                                        ui,
-                                        "Depth",
-                                        &mut ui_state.fluid_depth,
-                                        0.001..=0.02,
-                                        "m",
-                                        false,
-                                    );
-                                    slider_row(
-                                        ui,
-                                        "Damping",
-                                        &mut ui_state.fluid_damping,
-                                        0.0..=2.0,
-                                        "",
-                                        false,
-                                    );
-                                });
-                        });
-                        ui.add_space(6.0);
-                    }
-
-                    // Voice control
-                    styled_card(ui, "VOICE", |ui| {
-                        ui.checkbox(&mut ui_state.voice_control, "Enable mic input");
-                        if ui_state.voice_control {
-                            ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new(format!("Freq: {:.0} Hz", ui_state.voice_freq))
-                                    .color(ACCENT)
-                                    .size(11.0),
-                            );
-                            ui.label(
-                                egui::RichText::new(format!("RMS:  {:.4}", ui_state.voice_rms))
-                                    .color(ACCENT)
-                                    .size(11.0),
-                            );
-                        }
-                    });
-
-                    ui.add_space(6.0);
-
-                    // Status
-                    styled_card(ui, "STATUS", |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!("{:.0} FPS", ui_state.fps))
-                                    .color(TEXT_DIM)
-                                    .size(11.0),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let dot_color = if sim_state.granular_data.is_some()
-                                        || sim_state.fluid_data.is_some()
-                                        || sim_state.acoustic_data.is_some()
-                                    {
-                                        ACCENT
-                                    } else {
-                                        egui::Color32::from_rgb(242, 166, 90)
-                                    };
-                                    ui.colored_label(
-                                        dot_color,
-                                        if dot_color == ACCENT {
-                                            "STREAMING"
-                                        } else {
-                                            "STARTING"
-                                        },
-                                    );
-                                    ui.colored_label(dot_color, "●");
-                                },
-                            );
-                        });
-                        ui.label(
-                            egui::RichText::new(if sim_state.status.is_empty() {
-                                format!("{} module", ui_state.active_module.label())
-                            } else {
-                                sim_state.status.clone()
-                            })
-                            .color(ACCENT)
-                            .size(12.0)
-                            .strong(),
-                        );
-
-                        match ui_state.active_module {
-                            ActiveModule::Granular => {
-                                if let Some(data) = &sim_state.granular_data {
-                                    ui.label(
-                                        egui::RichText::new(format!("{} grains", data.len()))
-                                            .color(TEXT_DIM)
-                                            .size(11.0),
-                                    );
-                                } else {
-                                    ui.label(
-                                        egui::RichText::new("waiting...")
-                                            .color(egui::Color32::from_rgb(242, 166, 90))
-                                            .size(11.0),
-                                    );
-                                }
-                            }
-                            ActiveModule::Fluid => {
-                                if let Some(data) = &sim_state.fluid_data {
-                                    ui.label(
-                                        egui::RichText::new(format!("{} nodes", data.len()))
-                                            .color(TEXT_DIM)
-                                            .size(11.0),
-                                    );
-                                } else {
-                                    ui.label(
-                                        egui::RichText::new("waiting...")
-                                            .color(egui::Color32::from_rgb(242, 166, 90))
-                                            .size(11.0),
-                                    );
-                                }
-                            }
-                            ActiveModule::Acoustic => {
-                                if let Some(data) = &sim_state.acoustic_data {
-                                    ui.label(
-                                        egui::RichText::new(format!("{} cells", data.len()))
-                                            .color(TEXT_DIM)
-                                            .size(11.0),
-                                    );
-                                } else {
-                                    ui.label(
-                                        egui::RichText::new("waiting...")
-                                            .color(egui::Color32::from_rgb(242, 166, 90))
-                                            .size(11.0),
-                                    );
-                                }
-                            }
-                        }
-                    });
-
-                    ui.add_space(8.0);
-                });
-        });
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn panel_width_scales_then_clamps() {
+        // Wide windows reserve the full floating panel (24 + 328 + 16).
         let p1000 = responsive_panel_width(1000.0);
-        assert!((p1000 - 300.0).abs() < 1e-4);
+        assert!((p1000 - 368.0).abs() < 1e-4);
         let p800 = responsive_panel_width(800.0);
-        assert!((p800 - 240.0).abs() < 1e-4);
+        assert!((p800 - 368.0).abs() < 1e-4);
         let p500 = responsive_panel_width(500.0);
-        assert!((p500 - 220.0).abs() < 1e-4);
+        assert!((p500 - 368.0).abs() < 1e-4);
         let p10000 = responsive_panel_width(10_000.0);
-        assert!((p10000 - 300.0).abs() < 1e-4);
+        assert!((p10000 - 368.0).abs() < 1e-4);
+        // Narrow windows shrink the panel but never below 240px.
+        let p300 = responsive_panel_width(300.0);
+        assert!((p300 - 292.0).abs() < 1e-4);
     }
 }

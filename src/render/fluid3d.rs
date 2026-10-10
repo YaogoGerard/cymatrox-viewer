@@ -1,9 +1,10 @@
 use bevy::camera::visibility::RenderLayers;
+use bevy::log::debug;
 use bevy::prelude::*;
 use bevy::render::mesh::Indices;
 use bevy_panorbit_camera::PanOrbitCamera;
 
-use crate::SimState;
+use crate::{ActiveModule, SimState, UiState};
 
 const LAYER: RenderLayers = RenderLayers::layer(2);
 
@@ -42,15 +43,27 @@ pub fn setup_fluid_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     // Perspective camera slightly raised (≈38° above horizontal) so the
     // surface relief and raking light read clearly, while still revealing the
     // radial symmetry of the pattern. Left = press, right = orbit, wheel = zoom.
     commands.spawn((
         Camera3d::default(),
+        // A cheap 1×1 cubemap "studio" gives the water sheen and the metal dish
+        // something real to reflect, and adds a soft ambient term. It is built
+        // once and free at runtime (unlike screen-space refraction).
+        EnvironmentMapLight::hemispherical_gradient(
+            &mut images,
+            Color::srgb(0.18, 0.20, 0.26),
+            Color::srgb(0.055, 0.065, 0.085),
+            Color::srgb(0.014, 0.016, 0.022),
+        ),
         Camera {
             is_active: false,
-            clear_color: ClearColorConfig::Default,
+            // Same dark stage as the mock-up, so every module shares the
+            // panel's palette instead of each inventing its own background.
+            clear_color: ClearColorConfig::Custom(crate::render::STAGE_BG),
             ..default()
         },
         Transform::from_xyz(0.0, 4.5, 7.5).looking_at(Vec3::ZERO, Vec3::Y),
@@ -129,15 +142,18 @@ pub fn setup_fluid_scene(
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
 
-    // Surface color comes from per-vertex colors (crests cyan, troughs deep
-    // blue) so the pattern is readable whatever the lighting. White base lets
-    // those vertex colors show through; moderate roughness keeps water sheen.
+    // Water: a glossy, near-mirror surface (very low roughness + clearcoat
+    // sheen). Cymatics photographs read the liquid through its specular
+    // highlights, so a polished opaque surface looks more convincingly like
+    // water than screen-space refraction would — and costs far less on an
+    // integrated GPU. Vertex colours (crests/troughs) still drive the relief.
     let mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.025, 0.16, 0.28),
-        perceptual_roughness: 0.16,
+        base_color: Color::srgb(0.05, 0.16, 0.24),
+        perceptual_roughness: 0.045,
         metallic: 0.0,
-        emissive: LinearRgba::rgb(0.0, 0.015, 0.025),
-        specular_transmission: 0.0,
+        reflectance: 0.6,
+        clearcoat: 1.0,
+        clearcoat_perceptual_roughness: 0.05,
         cull_mode: None,
         ..default()
     });
@@ -195,11 +211,17 @@ pub fn setup_fluid_scene(
 
 pub fn update_fluid_mesh(
     sim_state: Res<SimState>,
+    ui_state: Res<UiState>,
     query: Query<&Mesh3d, With<FluidHeightmap>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut state: Local<Option<FluidDisplayState>>,
     mut last_log: Local<Option<std::time::Instant>>,
 ) {
+    // Only rebuild the visible module; hidden snapshots are stale.
+    if ui_state.active_module != ActiveModule::Fluid {
+        return;
+    }
+
     let Some(data) = &sim_state.fluid_data else {
         return;
     };
@@ -219,7 +241,7 @@ pub fn update_fluid_mesh(
             .unwrap_or(true);
         if do_log {
             let max_h = data.iter().map(|d| d.height.abs()).fold(0.0f32, f32::max);
-            eprintln!(
+            debug!(
                 "[fluid3d] update: {} nodes, max |h|={:.3e} m",
                 data.len(),
                 max_h
@@ -231,22 +253,25 @@ pub fn update_fluid_mesh(
     let node_count = data.len().min(GRID_OUT * GRID_OUT);
     // Keep the physical amplitude. Only non-finite samples are discarded;
     // there is no per-frame normalization or hidden gain.
-    let mut target: Vec<f32> = Vec::with_capacity(node_count);
-    for i in 0..node_count {
-        let height = data[i].height;
-        target.push(if height.is_finite() {
-            (height * DISPLAY_HEIGHT_SCALE).clamp(-MAX_DISPLAY_HEIGHT, MAX_DISPLAY_HEIGHT)
-        } else {
-            0.0
-        });
-    }
+    let target: Vec<f32> = data
+        .iter()
+        .take(node_count)
+        .map(|node| {
+            let height = node.height;
+            if height.is_finite() {
+                (height * DISPLAY_HEIGHT_SCALE).clamp(-MAX_DISPLAY_HEIGHT, MAX_DISPLAY_HEIGHT)
+            } else {
+                0.0
+            }
+        })
+        .collect();
 
     // Time-smooth into the display field.
     let mut hlin: Vec<f32> = Vec::with_capacity(node_count);
     if let Some(st) = state.as_mut() {
         if st.field.len() == node_count {
-            for i in 0..node_count {
-                hlin.push(st.field[i] + 0.8 * (target[i] - st.field[i]));
+            for (smoothed, goal) in st.field.iter().zip(target.iter()) {
+                hlin.push(smoothed + 0.8 * (goal - smoothed));
             }
             st.field = hlin.clone();
         } else {
@@ -310,7 +335,7 @@ pub fn update_fluid_mesh(
         }
     }
     if min_z.is_finite() && max_z.is_finite() {
-        eprintln!(
+        debug!(
             "[fluid3d] surface extent: y in [{:.3}, {:.3}] (range={:.3})",
             min_z,
             max_z,

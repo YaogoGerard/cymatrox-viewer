@@ -1,9 +1,10 @@
 use bevy::camera::visibility::RenderLayers;
+use bevy::log::{debug, warn};
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy_panorbit_camera::PanOrbitCamera;
 
-use crate::SimState;
+use crate::{ActiveModule, SimState, UiState};
 
 const LAYER: RenderLayers = RenderLayers::layer(3);
 
@@ -82,15 +83,18 @@ fn sample_trilinear(
     lerp(c0, c1, tz)
 }
 
+/// Fixed colour reference (pascals). The volume used to be normalised by the
+/// per-frame maximum pressure, which pinned the display to full brightness
+/// every frame and made the drive amplitude invisible. A constant reference
+/// means brightness now tracks the actual field: stronger drive = brighter,
+/// weaker field = dimmer, and the two can finally be compared.
+const PRESSURE_REFERENCE_PA: f32 = 1.0;
+
 /// Build a sparse voxel cloud. Disconnected, softly transparent cells make
 /// pressure variations read as a gas density instead of stacked cut planes.
 fn build_volume_mesh(data: &[cymatrox::acoustic::AcousticPressureNode], n: usize) -> Mesh {
     let half = WORLD_HALF;
-    let pmax = data
-        .iter()
-        .map(|d| d.pressure_pa.abs())
-        .fold(0.0f32, f32::max)
-        .max(1e-6);
+    let pmax = PRESSURE_REFERENCE_PA;
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut colors: Vec<[f32; 4]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
@@ -211,13 +215,23 @@ pub fn setup_acoustic_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     // --- Camera: 3/4 perspective orbit, dark clear color, module viewport ---
     commands.spawn((
         Camera3d::default(),
+        // Cheap generated studio environment so the machined transducers read
+        // as metal (they need something to reflect) and the scene gets a soft
+        // ambient fill. Built once, no per-frame cost.
+        EnvironmentMapLight::hemispherical_gradient(
+            &mut images,
+            Color::srgb(0.18, 0.20, 0.26),
+            Color::srgb(0.055, 0.065, 0.085),
+            Color::srgb(0.014, 0.016, 0.022),
+        ),
         Camera {
             is_active: false,
-            clear_color: ClearColorConfig::Custom(Color::srgb(0.015, 0.02, 0.06)),
+            clear_color: ClearColorConfig::Custom(crate::render::STAGE_BG),
             ..default()
         },
         Transform::from_xyz(2.6, 1.7, 2.6).looking_at(Vec3::ZERO, Vec3::Y),
@@ -256,12 +270,15 @@ pub fn setup_acoustic_scene(
     ));
 
     // A faint acrylic chamber gives the pressure field a physical enclosure
-    // instead of leaving the slices floating in empty space.
+    // instead of leaving the slices floating in empty space. Low roughness so
+    // its edges catch a sharp glass-like highlight without paying for real
+    // refraction.
     let chamber_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.08, 0.16, 0.24, 0.055),
+        base_color: Color::srgba(0.72, 0.82, 0.90, 0.045),
         alpha_mode: bevy_material::AlphaMode::Blend,
         metallic: 0.0,
-        perceptual_roughness: 0.12,
+        perceptual_roughness: 0.04,
+        reflectance: 0.6,
         cull_mode: None,
         ..default()
     });
@@ -309,12 +326,13 @@ pub fn setup_acoustic_scene(
         LAYER,
     ));
 
-    // --- Activity rims (glowing) on the inner face of each transducer ---
+    // --- Machined clamp rings on the inner face of each transducer ---
     let rim_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.2, 0.9, 0.6),
-        emissive: LinearRgba::rgb(0.0, 0.5, 0.3),
-        alpha_mode: bevy_material::AlphaMode::Add,
-        unlit: true,
+        base_color: Color::srgb(0.55, 0.58, 0.63),
+        metallic: 0.9,
+        perceptual_roughness: 0.3,
+        // Barely-there teal so the driven transducer still reads as "active".
+        emissive: LinearRgba::rgb(0.0, 0.04, 0.03),
         cull_mode: None,
         ..default()
     });
@@ -340,13 +358,16 @@ pub fn setup_acoustic_scene(
         LAYER,
     ));
 
-    // --- Levitating object: a small translucent sphere pinned at the nodal
-    //     point in the centre, clearly distinct from the abstract colour field.
+    // --- Levitating object: a small glossy bead held at the nodal point in
+    //     the centre. Polished and highly specular so it reads as a real
+    //     trapped particle rather than a glowing UI dot.
     let sphere_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.92, 0.96, 1.0),
-        perceptual_roughness: 0.05,
-        metallic: 0.3,
-        alpha_mode: bevy_material::AlphaMode::Blend,
+        base_color: Color::srgb(0.90, 0.94, 0.98),
+        perceptual_roughness: 0.06,
+        metallic: 0.0,
+        reflectance: 0.55,
+        clearcoat: 0.6,
+        clearcoat_perceptual_roughness: 0.1,
         ..default()
     });
     commands.spawn((
@@ -360,32 +381,46 @@ pub fn setup_acoustic_scene(
     ));
 }
 
+/// Frame-to-frame state the acoustic view keeps between runs (grouped so the
+/// system does not carry a long tail of separate `Local` parameters).
+#[derive(Default)]
+pub(crate) struct AcousticFrameState {
+    last_log: Option<std::time::Instant>,
+    last_rebuild: Option<std::time::Instant>,
+    particle_velocity: Vec3,
+}
+
 pub fn update_acoustic_points(
     sim_state: Res<SimState>,
+    ui_state: Res<UiState>,
     mut query: Query<&Mesh3d, With<AcousticVolume>>,
     mut particle_query: Query<&mut Transform, With<AcousticParticle>>,
     time: Res<Time>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut last_log: Local<Option<std::time::Instant>>,
-    mut last_rebuild: Local<Option<std::time::Instant>>,
-    mut particle_velocity: Local<Vec3>,
+    mut frame: Local<AcousticFrameState>,
 ) {
+    // Only the visible module is refreshed; hidden snapshots are stale.
+    if ui_state.active_module != ActiveModule::Acoustic {
+        return;
+    }
+
     let Some(data) = &sim_state.acoustic_data else {
         return;
     };
 
     let Ok(mesh3d) = query.single_mut() else {
-        eprintln!("[acoustic] no AcousticVolume entity found");
+        warn!("[acoustic] no AcousticVolume entity found");
         return;
     };
 
     let Some(mut mesh) = meshes.get_mut(&mesh3d.0) else {
-        eprintln!("[acoustic] mesh handle invalid");
+        warn!("[acoustic] mesh handle invalid");
         return;
     };
 
     let now = std::time::Instant::now();
-    let do_log = last_log
+    let do_log = frame
+        .last_log
         .as_ref()
         .map(|t| now.duration_since(*t) >= std::time::Duration::from_secs(1))
         .unwrap_or(true);
@@ -394,24 +429,25 @@ pub fn update_acoustic_points(
             .iter()
             .map(|d| d.pressure_pa.abs())
             .fold(0.0f32, f32::max);
-        eprintln!(
+        debug!(
             "[acoustic] update: {} nodes, |p|max={:.4} Pa",
             data.len(),
             pmax
         );
-        *last_log = Some(now);
+        frame.last_log = Some(now);
     }
 
     // Rebuilding the dense stack on every frame is wasteful on the iGPU; cap
     // it to ~20x/s so the volume refreshes but stays smooth.
-    let due = last_rebuild
+    let due = frame
+        .last_rebuild
         .as_ref()
         .map(|t| now.duration_since(*t) >= std::time::Duration::from_millis(50))
         .unwrap_or(true);
     if due {
         let n = grid_dim(data.len());
         *mesh = build_volume_mesh(data, n);
-        *last_rebuild = Some(now);
+        frame.last_rebuild = Some(now);
     }
 
     // Integrate the simulated Gor'kov force for the displayed particle.
@@ -426,8 +462,8 @@ pub fn update_acoustic_points(
         let mass = 4.0 / 3.0 * std::f32::consts::PI * 0.001_f32.powi(3) * 1000.0;
         let acceleration = force / mass - Vec3::new(0.0, 9.81, 0.0);
         let dt = time.delta_secs().min(0.05);
-        *particle_velocity = (*particle_velocity + acceleration * dt) * (-2.0 * dt).exp();
-        transform.translation += *particle_velocity * dt * 65.0;
+        frame.particle_velocity = (frame.particle_velocity + acceleration * dt) * (-2.0 * dt).exp();
+        transform.translation += frame.particle_velocity * dt * 65.0;
         transform.translation.x = transform.translation.x.clamp(-1.1, 1.1);
         transform.translation.y = transform.translation.y.clamp(-1.1, 1.1);
         transform.translation.z = transform.translation.z.clamp(-1.1, 1.1);

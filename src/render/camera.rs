@@ -9,6 +9,20 @@ pub struct OrbitCamera;
 #[derive(Component)]
 pub struct ModuleViewportCamera;
 
+/// Module cameras plus their per-module markers, used to route orbit input to
+/// whichever 3D module is currently on screen.
+type ModuleCameraQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut PanOrbitCamera,
+        &'static Camera,
+        Option<&'static crate::render::fluid3d::FluidCamera>,
+        Option<&'static crate::render::acoustic3d::AcousticCamera>,
+    ),
+    With<ModuleViewportCamera>,
+>;
+
 /// Handles module cameras directly so egui's full-screen context cannot
 /// prevent PanOrbit from receiving input intended for the 3D viewport.
 pub fn manual_module_controls(
@@ -17,15 +31,7 @@ pub fn manual_module_controls(
     mouse: Res<ButtonInput<MouseButton>>,
     mut motion: MessageReader<MouseMotion>,
     mut wheel: MessageReader<MouseWheel>,
-    mut cameras: Query<
-        (
-            &mut PanOrbitCamera,
-            &Camera,
-            Option<&crate::render::fluid3d::FluidCamera>,
-            Option<&crate::render::acoustic3d::AcousticCamera>,
-        ),
-        With<ModuleViewportCamera>,
-    >,
+    mut cameras: ModuleCameraQuery,
 ) {
     let Some(window) = windows.iter().next() else {
         return;
@@ -103,7 +109,7 @@ pub fn set_module_viewport(
     let Some(window) = windows.iter().next() else {
         return;
     };
-    let scale = window.scale_factor().max(0.001) as f32;
+    let scale = window.scale_factor().max(0.001);
     let logical_width = window.physical_width() as f32 / scale;
     let w = window.physical_width().max(1);
     let h = window.physical_height();

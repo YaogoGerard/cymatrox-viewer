@@ -8,7 +8,12 @@ pub fn default_config() -> GranularConfig {
     GranularConfig {
         experiment: Driving {
             frequency_hz: 440.0,
-            amplitude: 1e-4,
+            // 0.30 on the UI scale (×1 mm). A softer starting drive than the
+            // mock-up's 0.60: the grains creep onto the nodal lines instead of
+            // slamming into them, so the figure sharpens more gradually and
+            // reads less "painted". Still 3× the original 0.10, which was so
+            // weak the pattern took minutes to appear at all.
+            amplitude: 3e-4,
             modes: ModeSelection::Auto,
         },
         medium: PlateSpec::Idealized { side: 0.5 },

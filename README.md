@@ -7,7 +7,7 @@ Interactive cymatics laboratory written in Rust. Visualizes three wave phenomena
 - **Three simulation modes**: Granular (Chladni-like patterns), Fluid (Faraday waves on a circular dish), Acoustic (standing pressure field with transducers).
 - **Real-time rendering**: 2D instanced grains, 3D heightmap with lighting, sparse voxel volume rendering, orbit camera.
 - **Interactive control panel**: egui UI to tweak solver/liquid parameters, frequency and driving amplitude.
-- **Voice control**: optional microphone FFT input to drive frequency and amplitude.
+- **Voice control**: optional microphone FFT input to drive the frequency (pitch).
 - **Frame-rate independent pacing**: simulation runs at fixed physics steps per second regardless of render FPS.
 - **Production-ready packaging**: deb/AppImage (Linux), NSIS installer (Windows), DMG (macOS, unsigned). Auto-update via `cargo-packager-updater` using GitHub Releases.
 - **Traced logging**: configurable with `RUST_LOG` (e.g. `RUST_LOG=info,cymatrox_viewer=debug`).

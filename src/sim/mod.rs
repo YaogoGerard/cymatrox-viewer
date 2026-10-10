@@ -182,6 +182,30 @@ fn approx_eq(a: f32, b: f32) -> bool {
     (a - b).abs() <= PARAM_EPSILON * a.abs().max(b.abs()).max(1.0)
 }
 
+/// The Chladni mode the crate's `ModeSelection::Auto` picks for a frequency,
+/// under the ideal scaling `omega_mn = base · (m² + n²) / 2`.
+///
+/// The viewer needs to know when a frequency retune lands on a different mode
+/// (see the reseed note in `spawn_master`); this mirrors `GranularConfig::
+/// resolve_modes` exactly, including its lower-order tie-break, so the two can
+/// never disagree about the active figure.
+fn resolved_auto_mode(frequency_hz: f32, base_frequency_hz: f32) -> (u32, u32) {
+    let mut best = (1u32, 1u32);
+    let mut best_err = f32::INFINITY;
+    for m in 1..=24u32 {
+        for n in 1..=24u32 {
+            let err = (base_frequency_hz * (m * m + n * n) as f32 * 0.5 - frequency_hz).abs();
+            if err < best_err - f32::EPSILON
+                || ((err - best_err).abs() <= f32::EPSILON && m + n < best.0 + best.1)
+            {
+                best_err = err;
+                best = (m, n);
+            }
+        }
+    }
+    best
+}
+
 fn take_params(slot: &Arc<Mutex<Option<SimParams>>>) -> Option<SimParams> {
     slot.lock().ok().and_then(|mut guard| guard.take())
 }
@@ -237,6 +261,18 @@ fn spawn_master(
                 default_fluid.liquid.damping,
             );
 
+            // The plate rim is nodal for *every* mode, so grains that drift onto
+            // it never come back. Left alone, a few frequency sweeps pile the
+            // whole bed on the rim and no figure forms again. So whenever a
+            // retune lands on a different mode we rescatter the bed (rebuild the
+            // solver) and let the new figure settle. `built_mode` mirrors the
+            // crate's Auto selection; `reseed_since` debounces the rebuild while
+            // the frequency is still moving (slider drag, voice control).
+            let base_frequency_hz = default_granular.solver.base_frequency_hz;
+            let mut built_mode = resolved_auto_mode(params.frequency_hz, base_frequency_hz);
+            let mut reseed_armed = false;
+            let mut reseed_since = Instant::now();
+
             let mut granular: Option<cymatrox::granular::GranularSimulation> =
                 match cymatrox::granular::GranularSimulation::new(&ctx, granular_config_from(&params))
                 {
@@ -275,6 +311,9 @@ fn spawn_master(
                                         params.restitution,
                                         params.coupling_k,
                                     );
+                                    built_mode =
+                                        resolved_auto_mode(params.frequency_hz, base_frequency_hz);
+                                    reseed_armed = false;
                                     info!("[sim] granular ready");
                                 }
                                 Err(e) => report(format!("Granular initialization failed: {e}")),
@@ -349,11 +388,27 @@ fn spawn_master(
                     || !approx_eq(params.fluid_depth, built_liquid.2)
                     || !approx_eq(params.fluid_damping, built_liquid.3);
 
+                // A mode change asks for a rescatter, but only once the
+                // frequency has settled, so dragging the slider (or sweeping
+                // with the voice) doesn't rebuild the solver on every frame.
+                let mode_changed = active == Granular
+                    && resolved_auto_mode(params.frequency_hz, base_frequency_hz) != built_mode;
+                if mode_changed && !reseed_armed {
+                    reseed_armed = true;
+                    reseed_since = now;
+                } else if !mode_changed {
+                    reseed_armed = false;
+                }
+                let debounce_elapsed =
+                    now.duration_since(last_param_change) >= REBUILD_DEBOUNCE;
+                let mode_reseed_due =
+                    reseed_armed && now.duration_since(reseed_since) >= REBUILD_DEBOUNCE;
+
                 let rebuild_due = match active {
-                    Granular => solver_differs,
-                    Fluid => liquid_differs,
+                    Granular => (solver_differs && debounce_elapsed) || mode_reseed_due,
+                    Fluid => liquid_differs && debounce_elapsed,
                     Acoustic => false,
-                } && now.duration_since(last_param_change) >= REBUILD_DEBOUNCE;
+                };
 
                 if rebuild_due {
                     match active {
@@ -369,9 +424,15 @@ fn spawn_master(
                                         params.restitution,
                                         params.coupling_k,
                                     );
+                                    built_mode =
+                                        resolved_auto_mode(params.frequency_hz, base_frequency_hz);
+                                    reseed_armed = false;
                                     debug!(
-                                        "[sim] granular rebuilt drag={:.1} rest={:.2} ck={:.0}",
-                                        params.drag, params.restitution, params.coupling_k
+                                        "[sim] granular rebuilt drag={:.1} rest={:.2} ck={:.0} mode={:?}",
+                                        params.drag,
+                                        params.restitution,
+                                        params.coupling_k,
+                                        built_mode
                                     );
                                 }
                                 Err(e) => {
@@ -570,5 +631,15 @@ mod tests {
         assert!(approx_eq(0.0, 0.0));
         assert!(!approx_eq(0.0, 1.0));
         assert!(!approx_eq(1000.0, 1000.5));
+    }
+
+    #[test]
+    fn auto_mode_follows_the_ideal_scaling() {
+        // omega_mn = base·(m²+n²)/2 with base = 120 Hz.
+        assert_eq!(resolved_auto_mode(120.0, 120.0), (1, 1));
+        assert_eq!(resolved_auto_mode(440.0, 120.0), (2, 2)); // -> 480 Hz
+        assert_eq!(resolved_auto_mode(240.0, 120.0), (1, 2)); // -> 300 Hz
+                                                              // (2,3) and (3,2) both land on 780 Hz; the lower-order tie-break wins.
+        assert_eq!(resolved_auto_mode(780.0, 120.0), (2, 3));
     }
 }
