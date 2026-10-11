@@ -2,6 +2,13 @@ use cymatrox::granular::{
     Driving, GrainBed, GranularConfig, InitialDistribution, ModeSelection, PlateSpec, SolverParams,
 };
 
+/// Sand grains simulated (and drawn) per plate.
+///
+/// Single source of truth shared by the solver config and the renderer, so the
+/// mesh never disagrees with the snapshot it is fed. Dense enough that the
+/// figure reads as a continuous powder ridge rather than scattered dots.
+pub const GRAIN_COUNT: u32 = 16_384;
+
 pub fn default_config() -> GranularConfig {
     // The idealized plate keeps the solver deterministic; measured plate
     // eigenmodes can be introduced later through ModeSelection::Measured.
@@ -18,7 +25,7 @@ pub fn default_config() -> GranularConfig {
         },
         medium: PlateSpec::Idealized { side: 0.5 },
         grains: GrainBed {
-            count: 4096,
+            count: GRAIN_COUNT,
             distribution: InitialDistribution::Uniform,
             seed: 123,
         },

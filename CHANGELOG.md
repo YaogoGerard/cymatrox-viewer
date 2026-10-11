@@ -13,6 +13,15 @@ Every module is now lit with real PBR materials behind one shared cinematic post
 - **Granular**: reworked from a flat, unlit 2D view (`granular2d`) into a lit 3D scene (`granular3d`) — a dark metal Chladni plate with the sand rendered as shaded 3D grains. A top-down orthographic camera keeps the exact pixel mapping (`scale = 1/SCALE`), so the on-screen plate size and the UI caption are unchanged, and the bright grains still read against the dark plate
 - **Acoustic**: already PBR; it now shares the cinematic stack
 
+### Granular fluidity & sand realism
+
+The Chladni sand read as a stutter of scattered dots rather than flowing powder:
+
+- **Temporally filtered motion**: the renderer now chases the solver snapshots with a framerate-independent low-pass (`1 - exp(-rate·dt)`, the same trick the fluid module uses on its height field) instead of copying the newest frame verbatim, so the bed glides and settles. A solver rebuild restarts the filter cleanly rather than sliding the old bed across the plate
+- **Faster physics**: the granular solver integrates one `dt = 1/480 s` per `step()`, so the old 60 steps/s ran the motion at 0.125× speed. Raised to 240 steps/s (half-speed); the existing backlog cap keeps a slow device from spiralling, so it self-limits to whatever rate the GPU sustains
+- **Reconstructed pile**: a coarse density field built from the displayed grain positions raises grains where they stack on a nodal line and leans their shading normals along the pile's slope, so a ridge catches the key light and falls into shade on its flanks; crevices darken like contact shadowing
+- **Real grains**: 16 384 grains (up from 4 096), each an irregular, individually sized and tinted sand chip (jittered octahedron with a graded 0.72–1.30 radius) instead of 4 096 identical pointy octahedra. Sample count is shared with the solver (`sim::granular::GRAIN_COUNT`)
+
 ### Analytic CymaScope figure (single stable mode)
 
 The coarse, above-threshold fluid PDE cannot reliably settle on one Faraday figure: near-degenerate dish modes (e.g. `(9,1)` and `(6,2)` at ~30 Hz) grow together and **beat**, so the picture kept morphing instead of locking. The displayed figure is now the mode the dish selects in the weakly-driven limit — the one whose natural frequency is closest to the subharmonic `f/2` — evaluated analytically:

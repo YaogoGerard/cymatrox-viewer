@@ -12,7 +12,14 @@ pub mod granular;
 /// These match the previous fixed per-frame step counts at ~60 FPS, but are
 /// now decoupled from the render frame rate: the physics advances at the same
 /// rate whether the app renders at 30, 60 or 144 FPS.
-const GRANULAR_STEPS_PER_SEC: f64 = 60.0;
+///
+/// The granular solver integrates one `dt = 1/480 s` per `step()`, so the step
+/// rate sets how fast the sand actually flows against the wall clock. The old
+/// 60 steps/s ran the physics at 0.125× speed — a slow creep that reads as
+/// stutter, not motion. 240 steps/s pulls it to a natural half-speed while the
+/// backlog cap below keeps a slow GPU from spiralling (it simply self-limits to
+/// whatever rate the device sustains).
+const GRANULAR_STEPS_PER_SEC: f64 = 240.0;
 const ACOUSTIC_STEPS_PER_SEC: f64 = 60.0;
 
 /// Largest backlog of simulation steps the accumulator may hold. Without this
