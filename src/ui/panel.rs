@@ -4,7 +4,8 @@ use super::theme::{
 };
 use super::widgets;
 use crate::{
-    render::granular2d::PLATE_HALF_PX,
+    render::fluid3d,
+    render::granular3d::PLATE_HALF_PX,
     sim::{ACOUSTIC_AMPLITUDE_MPS, FLUID_AMPLITUDE_MPS2, GRANULAR_AMPLITUDE_M},
     ActiveModule, SimState, UiState,
 };
@@ -16,6 +17,7 @@ pub fn ui_panel(
     mut contexts: EguiContexts,
     mut ui_state: ResMut<UiState>,
     sim_state: Res<SimState>,
+    fluid_zoom: Res<fluid3d::FluidZoom>,
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
 ) -> Result {
     if let Some(fps) = diagnostics
@@ -53,39 +55,65 @@ pub fn ui_panel(
         });
 
     draw_frequency_ruler(ctx, ui_state.frequency_hz, viewport, total);
-    draw_stage_caption(ctx, ui_state.active_module, viewport, total);
+    draw_stage_caption(ctx, ui_state.active_module, viewport, total, fluid_zoom.0);
 
     Ok(())
 }
 
-/// Material caption pinned just above the plate in the granular view. The
-/// design presents the resonant plate as an aluminium specimen, so the
-/// material is called out beside the object itself.
+/// Caption pinned just above the specimen in the current view. The granular
+/// module presents an aluminium plate; the fluid module presents a top-down
+/// cymascope pool. Both are called out beside the object itself, matching the
+/// mock-up's instrument labelling.
 fn draw_stage_caption(
     ctx: &egui::Context,
     active_module: ActiveModule,
     viewport: egui::Rect,
     panel_total: f32,
+    fluid_zoom: f32,
 ) {
-    if active_module != ActiveModule::Granular {
-        return;
-    }
+    // The object is centred in the module viewport (the window minus the panel
+    // strip on the left). On narrow windows it can fill the whole width, so the
+    // caption sits centred just above its top edge — never over the figure or
+    // the frequency ruler.
+    let (text, id, object_top) = match active_module {
+        ActiveModule::Granular => (
+            "ALUMINIUM",
+            "granular-plate-caption",
+            viewport.center().y - PLATE_HALF_PX,
+        ),
+        ActiveModule::Fluid => {
+            // Mirror `fit_fluid_scope`: the pool radius is `PLATE_R/SCOPE_FIT_R`
+            // of the fitted scope radius, which occupies `SCOPE_FRACTION` of the
+            // shorter viewport edge (times the zoom).
+            let vp_left = viewport.left() + panel_total;
+            let vp_w = (viewport.right() - vp_left).max(1.0);
+            let vp_h = viewport.height().max(1.0);
+            let min_edge = vp_w.min(vp_h);
+            let pool_r_px = (fluid3d::PLATE_R / fluid3d::SCOPE_FIT_R)
+                * fluid3d::SCOPE_FRACTION
+                * 0.5
+                * min_edge
+                * fluid_zoom.max(0.0);
+            (
+                "CYMASCOPE",
+                "fluid-scope-caption",
+                viewport.center().y - pool_r_px,
+            )
+        }
+        ActiveModule::Acoustic => return,
+    };
 
-    // The plate is a square centred in the module viewport. On narrow windows
-    // it can fill the whole width, so the caption sits centred just above its
-    // top edge — never over the nodal figure or the frequency ruler.
     let center_x = (viewport.left() + panel_total + viewport.right()) * 0.5;
-    let plate_top = viewport.center().y - PLATE_HALF_PX;
-    let y = (plate_top - 12.0).max(viewport.top() + 8.0);
+    let y = (object_top - 12.0).max(viewport.top() + 8.0);
 
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
-        egui::Id::new("granular-plate-caption"),
+        egui::Id::new(id),
     ));
     painter.text(
         egui::pos2(center_x, y),
         egui::Align2::CENTER_BOTTOM,
-        "ALUMINIUM",
+        text,
         egui::FontId::monospace(11.0),
         ACCENT_DIM,
     );
@@ -472,7 +500,9 @@ fn status(ui_state: &UiState, sim_state: &SimState) -> (&'static str, egui::Colo
     }
     let streaming = match ui_state.active_module {
         ActiveModule::Granular => sim_state.granular_data.is_some(),
-        ActiveModule::Fluid => sim_state.fluid_data.is_some(),
+        // The CymaScope figure is computed synchronously on the render side
+        // (analytic glyph), so the Fluid module is ready as soon as it is shown.
+        ActiveModule::Fluid => true,
         ActiveModule::Acoustic => sim_state.acoustic_data.is_some(),
     };
     if streaming {

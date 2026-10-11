@@ -5,7 +5,7 @@ Interactive cymatics laboratory written in Rust. Visualizes three wave phenomena
 ## Features
 
 - **Three simulation modes**: Granular (Chladni-like patterns), Fluid (Faraday waves on a circular dish), Acoustic (standing pressure field with transducers).
-- **Real-time rendering**: 2D instanced grains, 3D heightmap with lighting, sparse voxel volume rendering, orbit camera.
+- **Real-time rendering**: a physically-lit 3D Chladni plate with sand grains, a sparse voxel pressure field, and a top-down *cymascope* view of the fluid dish — orthographic, with a graduated instrument bezel. Every module runs behind a shared cinematic stack (HDR rendering, filmic Tony McMapface tonemapping and bloom) with real PBR materials.
 - **Interactive control panel**: egui UI to tweak solver/liquid parameters, frequency and driving amplitude.
 - **Voice control**: optional microphone FFT input to drive the frequency (pitch).
 - **Frame-rate independent pacing**: simulation runs at fixed physics steps per second regardless of render FPS.

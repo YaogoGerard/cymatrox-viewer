@@ -220,6 +220,7 @@ pub fn setup_acoustic_scene(
     // --- Camera: 3/4 perspective orbit, dark clear color, module viewport ---
     commands.spawn((
         Camera3d::default(),
+        crate::render::cinematic(),
         // Cheap generated studio environment so the machined transducers read
         // as metal (they need something to reflect) and the scene gets a soft
         // ambient fill. Built once, no per-frame cost.

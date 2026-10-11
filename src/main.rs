@@ -84,7 +84,6 @@ impl ActiveModule {
 #[derive(Resource, Default)]
 pub struct SimState {
     pub granular_data: Option<Vec<cymatrox::granular::GranularData>>,
-    pub fluid_data: Option<Vec<cymatrox::fluid::FluidSurfaceNode>>,
     pub acoustic_data: Option<Vec<cymatrox::acoustic::AcousticPressureNode>>,
     pub status: String,
     pub error: bool,
@@ -143,7 +142,7 @@ fn main() {
                 setup_scene,
                 start_sim,
                 start_audio,
-                render::granular2d::setup_granular_scene,
+                render::granular3d::setup_granular_scene,
                 render::fluid3d::setup_fluid_scene,
                 render::acoustic3d::setup_acoustic_scene,
             ),
@@ -161,10 +160,12 @@ fn main() {
                 (poll_sim_data, poll_voice, sync_params, sync_module_switch),
                 (
                     render::camera::manual_module_controls,
-                    render::granular2d::update_granular_particles,
-                    render::granular2d::toggle_granular_visibility,
+                    render::granular3d::update_granular_particles,
+                    render::granular3d::toggle_granular_visibility,
                     render::camera::toggle_orbit_visibility,
                     render::camera::set_module_viewport,
+                    render::fluid3d::zoom_fluid_scope,
+                    render::fluid3d::fit_fluid_scope,
                     render::fluid3d::update_fluid_mesh,
                     render::fluid3d::toggle_fluid_visibility,
                     render::acoustic3d::update_acoustic_points,
@@ -247,10 +248,6 @@ fn poll_sim_data(data_rx: Res<sim::SimDataReceiver>, mut sim_state: ResMut<SimSt
                 sim_state.granular_data = Some(frame);
                 sim_state.error = false;
             }
-            sim::SimData::Fluid(frame) => {
-                sim_state.fluid_data = Some(frame);
-                sim_state.error = false;
-            }
             sim::SimData::Acoustic(frame) => {
                 sim_state.acoustic_data = Some(frame);
                 sim_state.error = false;
@@ -266,7 +263,6 @@ fn poll_sim_data(data_rx: Res<sim::SimDataReceiver>, mut sim_state: ResMut<SimSt
 
 fn diagnose(
     ui_state: Res<UiState>,
-    sim_state: Res<SimState>,
     fluid_cams: Query<&Camera, With<render::fluid3d::FluidCamera>>,
     fluid_mesh_q: Query<&Mesh3d, With<render::fluid3d::FluidHeightmap>>,
     meshes: Res<Assets<Mesh>>,
@@ -278,9 +274,8 @@ fn diagnose(
     }
     for cam in &fluid_cams {
         debug!(
-            "[diag] module={:?} fluid_data={} fluid_cam_active={} viewport={:?}",
+            "[diag] module={:?} fluid_cam_active={} viewport={:?}",
             ui_state.active_module,
-            sim_state.fluid_data.as_ref().map(|d| d.len()).unwrap_or(0),
             cam.is_active,
             cam.viewport
                 .as_ref()
@@ -316,7 +311,9 @@ fn sync_module_switch(
             ActiveModule::Fluid if !defaults.fluid => {
                 info!("[module] applying fluid defaults");
                 ui_state.frequency_hz = 60.0;
-                ui_state.amplitude = 0.20; // x10 => 2.0 m/s^2 (visible Faraday regime)
+                // The CymaScope figure is normalised, so the amplitude slider
+                // only scales the rendered relief height on the Fluid view.
+                ui_state.amplitude = 0.28;
                 defaults.fluid = true;
             }
             ActiveModule::Acoustic if !defaults.acoustic => {

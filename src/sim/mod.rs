@@ -14,14 +14,13 @@ pub mod granular;
 /// rate whether the app renders at 30, 60 or 144 FPS.
 const GRANULAR_STEPS_PER_SEC: f64 = 60.0;
 const ACOUSTIC_STEPS_PER_SEC: f64 = 60.0;
-const FLUID_STEPS_PER_SEC: f64 = 4800.0;
 
 /// Largest backlog of simulation steps the accumulator may hold. Without this
 /// cap, a single GPU step slower than its budget would grow the backlog without
 /// bound and trigger an ever-worsening catch-up spiral.
 const MAX_BACKLOG_SECONDS: f64 = 0.1;
 
-/// How long solver/liquid parameters must remain stable before the affected
+/// How long solver parameters must remain stable before the affected
 /// simulation is rebuilt. Prevents a rebuild on every frame while a slider is
 /// being dragged.
 const REBUILD_DEBOUNCE: Duration = Duration::from_millis(300);
@@ -32,8 +31,9 @@ const PARAM_EPSILON: f32 = 1e-6;
 
 /// Normalized UI amplitude converted to plate displacement in metres.
 pub const GRANULAR_AMPLITUDE_M: f32 = 0.001;
-/// Normalized UI amplitude converted to vertical acceleration amplitude (m/s²).
-pub const FLUID_AMPLITUDE_MPS2: f32 = 10.0;
+/// Acceleration amplitude (m/s²) the Fluid module's amplitude slider represents.
+/// The figure itself is the normalised analytic glyph, so this is a unit label.
+pub const FLUID_AMPLITUDE_MPS2: f32 = 40.0;
 /// Normalized UI amplitude converted to transducer normal velocity (m/s).
 pub const ACOUSTIC_AMPLITUDE_MPS: f32 = 0.002;
 
@@ -57,7 +57,7 @@ impl SimParams {
     /// physical defaults of the corresponding module config.
     pub fn sanitized(self) -> Self {
         let g = granular::default_config();
-        let f = fluid::default_config();
+        let f = fluid::default_liquid();
         let sanitize = |value: f32, fallback: f32, min: f32, max: f32| {
             if value.is_finite() {
                 value.clamp(min, max)
@@ -71,15 +71,15 @@ impl SimParams {
             drag: sanitize(self.drag, g.solver.drag, 0.0, 20.0),
             restitution: sanitize(self.restitution, g.solver.restitution, 0.0, 1.0),
             coupling_k: sanitize(self.coupling_k, g.solver.coupling_k, 1.0, 1.0e7),
-            fluid_density: sanitize(self.fluid_density, f.liquid.density, 800.0, 1500.0),
+            fluid_density: sanitize(self.fluid_density, f.density, 800.0, 1500.0),
             fluid_surface_tension: sanitize(
                 self.fluid_surface_tension,
-                f.liquid.surface_tension,
+                f.surface_tension,
                 0.01,
                 0.5,
             ),
-            fluid_depth: sanitize(self.fluid_depth, f.liquid.depth, 0.001, 0.02),
-            fluid_damping: sanitize(self.fluid_damping, f.liquid.damping, 0.0, 2.0),
+            fluid_depth: sanitize(self.fluid_depth, f.depth, 0.001, 0.02),
+            fluid_damping: sanitize(self.fluid_damping, 0.2, 0.0, 2.0),
         }
     }
 }
@@ -87,17 +87,17 @@ impl SimParams {
 impl Default for SimParams {
     fn default() -> Self {
         let g = granular::default_config();
-        let f = fluid::default_config();
+        let f = fluid::default_liquid();
         Self {
             frequency_hz: g.experiment.frequency_hz,
             amplitude: g.experiment.amplitude / GRANULAR_AMPLITUDE_M,
             drag: g.solver.drag,
             restitution: g.solver.restitution,
             coupling_k: g.solver.coupling_k,
-            fluid_density: f.liquid.density,
-            fluid_surface_tension: f.liquid.surface_tension,
-            fluid_depth: f.liquid.depth,
-            fluid_damping: f.liquid.damping,
+            fluid_density: f.density,
+            fluid_surface_tension: f.surface_tension,
+            fluid_depth: f.depth,
+            fluid_damping: 0.2,
         }
     }
 }
@@ -105,7 +105,6 @@ impl Default for SimParams {
 /// Data sent from the sim thread back to Bevy.
 pub enum SimData {
     Granular(Vec<cymatrox::granular::GranularData>),
-    Fluid(Vec<cymatrox::fluid::FluidSurfaceNode>),
     Acoustic(Vec<cymatrox::acoustic::AcousticPressureNode>),
     Status(String),
 }
@@ -149,46 +148,14 @@ pub fn start_sim_thread() -> (SimDataReceiver, SimParamsSlot, SimControl) {
     )
 }
 
-/// Builds a granular config from the current parameters.
-fn granular_config_from(params: &SimParams) -> cymatrox::granular::GranularConfig {
-    let mut cfg = granular::default_config();
-    cfg.experiment.frequency_hz = params.frequency_hz;
-    cfg.experiment.amplitude = params.amplitude * GRANULAR_AMPLITUDE_M;
-    cfg.solver.drag = params.drag;
-    cfg.solver.restitution = params.restitution;
-    cfg.solver.coupling_k = params.coupling_k;
-    cfg
-}
-
-/// Builds a fluid config from the current parameters.
-fn fluid_config_from(params: &SimParams) -> cymatrox::fluid::FluidConfig {
-    cymatrox::fluid::FluidConfig {
-        driving: cymatrox::fluid::Driving {
-            frequency_hz: params.frequency_hz,
-            amplitude: params.amplitude * FLUID_AMPLITUDE_MPS2,
-        },
-        liquid: cymatrox::fluid::LiquidSpec {
-            density: params.fluid_density,
-            surface_tension: params.fluid_surface_tension,
-            depth: params.fluid_depth,
-            damping: params.fluid_damping,
-            gravity: 9.81,
-        },
-        ..fluid::default_config()
-    }
-}
-
-fn approx_eq(a: f32, b: f32) -> bool {
-    (a - b).abs() <= PARAM_EPSILON * a.abs().max(b.abs()).max(1.0)
-}
-
 /// The Chladni mode the crate's `ModeSelection::Auto` picks for a frequency,
-/// under the ideal scaling `omega_mn = base · (m² + n²) / 2`.
+/// under its documented ideal scaling `ω_mn = ω_base · (m² + n²) / 2` with a
+/// lower-order tie-break (ADR-0009).
 ///
 /// The viewer needs to know when a frequency retune lands on a different mode
-/// (see the reseed note in `spawn_master`); this mirrors `GranularConfig::
-/// resolve_modes` exactly, including its lower-order tie-break, so the two can
-/// never disagree about the active figure.
+/// (see the reseed note in `spawn_master`). The crate computes this internally
+/// but does not expose it, so we mirror the documented scaling here; it is the
+/// only piece of crate behaviour we reproduce, and only to schedule a rescatter.
 fn resolved_auto_mode(frequency_hz: f32, base_frequency_hz: f32) -> (u32, u32) {
     let mut best = (1u32, 1u32);
     let mut best_err = f32::INFINITY;
@@ -204,6 +171,21 @@ fn resolved_auto_mode(frequency_hz: f32, base_frequency_hz: f32) -> (u32, u32) {
         }
     }
     best
+}
+
+/// Builds a granular config from the current parameters.
+fn granular_config_from(params: &SimParams) -> cymatrox::granular::GranularConfig {
+    let mut cfg = granular::default_config();
+    cfg.experiment.frequency_hz = params.frequency_hz;
+    cfg.experiment.amplitude = params.amplitude * GRANULAR_AMPLITUDE_M;
+    cfg.solver.drag = params.drag;
+    cfg.solver.restitution = params.restitution;
+    cfg.solver.coupling_k = params.coupling_k;
+    cfg
+}
+
+fn approx_eq(a: f32, b: f32) -> bool {
+    (a - b).abs() <= PARAM_EPSILON * a.abs().max(b.abs()).max(1.0)
 }
 
 fn take_params(slot: &Arc<Mutex<Option<SimParams>>>) -> Option<SimParams> {
@@ -248,17 +230,10 @@ fn spawn_master(
             let mut active = Granular;
 
             let default_granular = granular::default_config();
-            let default_fluid = fluid::default_config();
             let mut built_solver = (
                 default_granular.solver.drag,
                 default_granular.solver.restitution,
                 default_granular.solver.coupling_k,
-            );
-            let mut built_liquid = (
-                default_fluid.liquid.density,
-                default_fluid.liquid.surface_tension,
-                default_fluid.liquid.depth,
-                default_fluid.liquid.damping,
             );
 
             // The plate rim is nodal for *every* mode, so grains that drift onto
@@ -285,7 +260,6 @@ fn spawn_master(
                         None
                     }
                 };
-            let mut fluid: Option<cymatrox::fluid::FluidSimulation> = None;
             let mut acoustic: Option<cymatrox::acoustic::AcousticSimulation> = None;
 
             let mut last_tick = Instant::now();
@@ -319,24 +293,6 @@ fn spawn_master(
                                 Err(e) => report(format!("Granular initialization failed: {e}")),
                             }
                         }
-                        Fluid if fluid.is_none() => {
-                            match cymatrox::fluid::FluidSimulation::new(
-                                &ctx,
-                                fluid_config_from(&params),
-                            ) {
-                                Ok(s) => {
-                                    fluid = Some(s);
-                                    built_liquid = (
-                                        params.fluid_density,
-                                        params.fluid_surface_tension,
-                                        params.fluid_depth,
-                                        params.fluid_damping,
-                                    );
-                                    info!("[sim] fluid ready");
-                                }
-                                Err(e) => report(format!("Fluid initialization failed: {e}")),
-                            }
-                        }
                         Acoustic if acoustic.is_none() => {
                             match cymatrox::acoustic::AcousticSimulation::new(
                                 &ctx,
@@ -362,15 +318,10 @@ fn spawn_master(
                     last_param_change = Instant::now();
 
                     let granular_amp = params.amplitude * GRANULAR_AMPLITUDE_M;
-                    let fluid_amp = params.amplitude * FLUID_AMPLITUDE_MPS2;
                     let acoustic_amp = params.amplitude * ACOUSTIC_AMPLITUDE_MPS;
                     if let Some(s) = granular.as_mut() {
                         s.set_frequency(params.frequency_hz);
                         s.set_amplitude(granular_amp);
-                    }
-                    if let Some(s) = fluid.as_mut() {
-                        s.set_frequency(params.frequency_hz);
-                        s.set_amplitude(fluid_amp);
                     }
                     if let Some(s) = acoustic.as_mut() {
                         s.set_frequency(params.frequency_hz);
@@ -383,10 +334,6 @@ fn spawn_master(
                 let solver_differs = !approx_eq(params.drag, built_solver.0)
                     || !approx_eq(params.restitution, built_solver.1)
                     || !approx_eq(params.coupling_k, built_solver.2);
-                let liquid_differs = !approx_eq(params.fluid_density, built_liquid.0)
-                    || !approx_eq(params.fluid_surface_tension, built_liquid.1)
-                    || !approx_eq(params.fluid_depth, built_liquid.2)
-                    || !approx_eq(params.fluid_damping, built_liquid.3);
 
                 // A mode change asks for a rescatter, but only once the
                 // frequency has settled, so dragging the slider (or sweeping
@@ -406,8 +353,7 @@ fn spawn_master(
 
                 let rebuild_due = match active {
                     Granular => (solver_differs && debounce_elapsed) || mode_reseed_due,
-                    Fluid => liquid_differs && debounce_elapsed,
-                    Acoustic => false,
+                    Fluid | Acoustic => false,
                 };
 
                 if rebuild_due {
@@ -440,33 +386,7 @@ fn spawn_master(
                                 }
                             }
                         }
-                        Fluid => {
-                            match cymatrox::fluid::FluidSimulation::new(
-                                &ctx,
-                                fluid_config_from(&params),
-                            ) {
-                                Ok(s) => {
-                                    fluid = Some(s);
-                                    built_liquid = (
-                                        params.fluid_density,
-                                        params.fluid_surface_tension,
-                                        params.fluid_depth,
-                                        params.fluid_damping,
-                                    );
-                                    debug!(
-                                        "[sim] fluid rebuilt density={:.0} st={:.3} depth={:.4} damping={:.1}",
-                                        params.fluid_density,
-                                        params.fluid_surface_tension,
-                                        params.fluid_depth,
-                                        params.fluid_damping
-                                    );
-                                }
-                                Err(e) => {
-                                    report(format!("Fluid rebuild failed: {e}"));
-                                }
-                            }
-                        }
-                        Acoustic => {}
+                        Fluid | Acoustic => {}
                     }
                     // Avoid re-triggering until parameters change again.
                     last_param_change = now;
@@ -475,8 +395,10 @@ fn spawn_master(
                 // --- Frame-rate-independent pacing ----------------------------------
                 let steps_per_sec = match active {
                     Granular => GRANULAR_STEPS_PER_SEC,
-                    Fluid => FLUID_STEPS_PER_SEC,
                     Acoustic => ACOUSTIC_STEPS_PER_SEC,
+                    // No solver: the CymaScope figure is computed synchronously
+                    // viewer-side, so there is nothing to pace.
+                    Fluid => 0.0,
                 };
                 let elapsed = now.duration_since(last_tick).as_secs_f64();
                 last_tick = now;
@@ -487,8 +409,8 @@ fn spawn_master(
                 }
                 let has_sim = match active {
                     Granular => granular.is_some(),
-                    Fluid => fluid.is_some(),
                     Acoustic => acoustic.is_some(),
+                    Fluid => false,
                 };
                 let mut steps = accumulator.floor() as usize;
                 if has_sim {
@@ -517,19 +439,9 @@ fn spawn_master(
                             }
                         }
                     }
-                    Fluid => {
-                        if let Some(sim) = fluid.as_mut() {
-                            for _ in 0..steps {
-                                match sim.step() {
-                                    Ok(frame) => latest = Some(SimData::Fluid(frame)),
-                                    Err(e) => {
-                                        report(format!("Fluid step failed: {e}"));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // No solver: the CymaScope figure is viewer-side and
+                    // synchronous, so there is nothing to step.
+                    Fluid => {}
                     Acoustic => {
                         if let Some(sim) = acoustic.as_mut() {
                             for _ in 0..steps {
@@ -569,13 +481,13 @@ mod tests {
     fn defaults_track_module_configs() {
         let params = SimParams::default();
         let g = granular::default_config();
-        let f = fluid::default_config();
+        let f = fluid::default_liquid();
         assert!((params.frequency_hz - g.experiment.frequency_hz).abs() < f32::EPSILON);
         assert!((params.drag - g.solver.drag).abs() < f32::EPSILON);
         assert!((params.restitution - g.solver.restitution).abs() < f32::EPSILON);
         assert!((params.coupling_k - g.solver.coupling_k).abs() < f32::EPSILON);
-        assert!((params.fluid_density - f.liquid.density).abs() < f32::EPSILON);
-        assert!((params.fluid_depth - f.liquid.depth).abs() < f32::EPSILON);
+        assert!((params.fluid_density - f.density).abs() < f32::EPSILON);
+        assert!((params.fluid_depth - f.depth).abs() < f32::EPSILON);
         // Normalized amplitude round-trips back to the physical driving value.
         assert!((params.amplitude * GRANULAR_AMPLITUDE_M - g.experiment.amplitude).abs() < 1e-9);
     }
@@ -631,15 +543,5 @@ mod tests {
         assert!(approx_eq(0.0, 0.0));
         assert!(!approx_eq(0.0, 1.0));
         assert!(!approx_eq(1000.0, 1000.5));
-    }
-
-    #[test]
-    fn auto_mode_follows_the_ideal_scaling() {
-        // omega_mn = base·(m²+n²)/2 with base = 120 Hz.
-        assert_eq!(resolved_auto_mode(120.0, 120.0), (1, 1));
-        assert_eq!(resolved_auto_mode(440.0, 120.0), (2, 2)); // -> 480 Hz
-        assert_eq!(resolved_auto_mode(240.0, 120.0), (1, 2)); // -> 300 Hz
-                                                              // (2,3) and (3,2) both land on 780 Hz; the lower-order tie-break wins.
-        assert_eq!(resolved_auto_mode(780.0, 120.0), (2, 3));
     }
 }
