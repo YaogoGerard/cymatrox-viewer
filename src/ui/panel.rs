@@ -232,7 +232,7 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
     );
     ui.add_space(2.0);
     ui.label(
-        egui::RichText::new("Visualiseur de cymatique")
+        egui::RichText::new("Cymatics viewer")
             .color(TEXT_DIM)
             .size(11.0),
     );
@@ -244,7 +244,7 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
         ActiveModule::Fluid => 1,
         ActiveModule::Acoustic => 2,
     };
-    if let Some(index) = widgets::segmented(ui, &["Granulaire", "Fluide", "Acoustique"], selected) {
+    if let Some(index) = widgets::segmented(ui, &["Granular", "Fluid", "Acoustic"], selected) {
         let module = match index {
             0 => ActiveModule::Granular,
             1 => ActiveModule::Fluid,
@@ -267,7 +267,7 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(
-                    egui::RichText::new("ERREUR")
+                    egui::RichText::new("ERROR")
                         .color(ERROR_BORDER)
                         .size(10.0)
                         .strong()
@@ -283,8 +283,8 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
         ui.add_space(18.0);
     }
 
-    // Pilotage
-    widgets::section_label(ui, "PILOTAGE");
+    // Control
+    widgets::section_label(ui, "CONTROL");
     ui.add_space(8.0);
     widgets::big_readout(ui, &format!("{:.1}", ui_state.frequency_hz), "Hz");
     ui.add_space(14.0);
@@ -329,13 +329,13 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
     widgets::divider(ui);
     ui.add_space(18.0);
 
-    // Physique (module specific). The acoustic module exposes no physical
+    // Physics (module specific). The acoustic module exposes no physical
     // parameters in the design, so its single divider leads straight to voice.
     match ui_state.active_module {
         ActiveModule::Granular => {
-            widgets::section_label(ui, "PHYSIQUE · GRANULAIRE");
+            widgets::section_label(ui, "PHYSICS · GRANULAR");
             ui.add_space(10.0);
-            param_row(ui, "Frottement", &mut ui_state.drag, 0.0..=20.0, 2, "");
+            param_row(ui, "Friction", &mut ui_state.drag, 0.0..=20.0, 2, "");
             ui.add_space(14.0);
             param_row(
                 ui,
@@ -348,7 +348,7 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
             ui.add_space(14.0);
             param_row(
                 ui,
-                "Couplage k",
+                "Coupling k",
                 &mut ui_state.coupling_k,
                 1.0..=1.0e7,
                 0,
@@ -359,11 +359,11 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
             ui.add_space(18.0);
         }
         ActiveModule::Fluid => {
-            widgets::section_label(ui, "PHYSIQUE · LIQUIDE");
+            widgets::section_label(ui, "PHYSICS · LIQUID");
             ui.add_space(10.0);
             param_row(
                 ui,
-                "Densité",
+                "Density",
                 &mut ui_state.fluid_density,
                 800.0..=1500.0,
                 0,
@@ -372,30 +372,16 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
             ui.add_space(14.0);
             param_row(
                 ui,
-                "Tension de surface",
+                "Surface tension",
                 &mut ui_state.fluid_surface_tension,
                 0.01..=0.5,
                 3,
                 "N/m",
             );
             ui.add_space(14.0);
-            param_row(
-                ui,
-                "Profondeur",
-                &mut ui_state.fluid_depth,
-                0.001..=0.02,
-                3,
-                "m",
-            );
+            param_row(ui, "Depth", &mut ui_state.fluid_depth, 0.001..=0.02, 3, "m");
             ui.add_space(14.0);
-            param_row(
-                ui,
-                "Amortissement",
-                &mut ui_state.fluid_damping,
-                0.0..=2.0,
-                2,
-                "",
-            );
+            param_row(ui, "Damping", &mut ui_state.fluid_damping, 0.0..=2.0, 2, "");
             ui.add_space(18.0);
             widgets::divider(ui);
             ui.add_space(18.0);
@@ -408,7 +394,7 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.label(
-                egui::RichText::new("Contrôle par la voix")
+                egui::RichText::new("Voice control")
                     .color(TEXT_NORMAL)
                     .size(12.0),
             );

@@ -44,6 +44,7 @@ The coarse, above-threshold fluid PDE cannot reliably settle on one Faraday figu
 
 ### UI redesign (unreleased)
 
+- Interface strings are English throughout (the control panel was partly French: module names, section titles and the liquid/granular parameter labels)
 - New `src/ui/` module implementing the HTML mock-up: floating rounded control card with segmented module selector, big frequency readout, section labels, and a bottom foot bar (FPS + status pill)
 - Log-scale frequency ruler across the bottom of the viewport (20 Hz – 20 kHz) with accent marker at the current frequency
 - Embedded DM Sans / DM Mono fonts; dark theme matching the design palette
