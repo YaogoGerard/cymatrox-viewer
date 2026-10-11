@@ -83,27 +83,27 @@ fn draw_stage_caption(
     // the frequency ruler.
     let (text, id, object_top) = match active_module {
         ActiveModule::Granular => (
-            "ALUMINIUM",
+            "ALUMINIUM PLATE",
             "granular-plate-caption",
             viewport.center().y - PLATE_HALF_PX,
         ),
         ActiveModule::Fluid => {
             // Mirror `fit_fluid_scope`: the pool radius is `PLATE_R/SCOPE_FIT_R`
             // of the fitted scope radius, which occupies `SCOPE_FRACTION` of the
-            // shorter viewport edge (times the zoom).
+            // shorter viewport edge (times the zoom). The scope is lifted by
+            // `SCOPE_LIFT_FRACTION` of its own radius, so the caption rides up
+            // with the instrument.
             let vp_left = viewport.left() + panel_total;
             let vp_w = (viewport.right() - vp_left).max(1.0);
             let vp_h = viewport.height().max(1.0);
             let min_edge = vp_w.min(vp_h);
-            let pool_r_px = (fluid3d::PLATE_R / fluid3d::SCOPE_FIT_R)
-                * fluid3d::SCOPE_FRACTION
-                * 0.5
-                * min_edge
-                * fluid_zoom.max(0.0);
+            let scope_r_px = fluid3d::SCOPE_FRACTION * 0.5 * min_edge * fluid_zoom.max(0.0);
+            let pool_r_px = (fluid3d::PLATE_R / fluid3d::SCOPE_FIT_R) * scope_r_px;
+            let lift_px = fluid3d::SCOPE_LIFT_FRACTION * scope_r_px;
             (
                 "CYMASCOPE",
                 "fluid-scope-caption",
-                viewport.center().y - pool_r_px,
+                viewport.center().y - pool_r_px - lift_px,
             )
         }
         ActiveModule::Acoustic => return,

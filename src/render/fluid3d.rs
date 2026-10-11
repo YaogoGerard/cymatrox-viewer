@@ -34,6 +34,13 @@ const PLATE_RADIUS_M: f32 = 0.025;
 pub const SCOPE_FIT_R: f32 = 3.6;
 pub const SCOPE_FRACTION: f32 = 0.60;
 
+/// How far the instrument is lifted above the viewport centre, as a fraction of
+/// its own on-screen radius, so the dish and bezel clear the frequency ruler
+/// that the HUD draws along the bottom edge of the 3D view. A world-space offset
+/// of `SCOPE_LIFT_FRACTION * SCOPE_FIT_R` maps to exactly this many pixels
+/// whatever the window size (the fit scale is proportional to the shorter edge).
+pub const SCOPE_LIFT_FRACTION: f32 = 0.18;
+
 /// Graduated bezel ring drawn around the pool.
 const BEZEL_INNER: f32 = 3.06;
 const BEZEL_OUTER: f32 = 3.34;
@@ -148,8 +155,13 @@ pub fn setup_fluid_scene(
             clear_color: ClearColorConfig::Custom(crate::render::STAGE_BG),
             ..default()
         },
-        // Straight down; up = -Z keeps +X to the right on screen.
-        Transform::from_xyz(0.0, 30.0, 0.0).looking_at(Vec3::ZERO, Vec3::NEG_Z),
+        // Straight down; up = -Z keeps +X to the right on screen. The camera is
+        // nudged along +Z (screen up) so the instrument rides above the bottom
+        // HUD instead of sitting dead-centre in the viewport.
+        Transform::from_xyz(0.0, 30.0, SCOPE_LIFT_FRACTION * SCOPE_FIT_R).looking_at(
+            Vec3::new(0.0, 0.0, SCOPE_LIFT_FRACTION * SCOPE_FIT_R),
+            Vec3::NEG_Z,
+        ),
         FluidCamera,
         crate::render::camera::ModuleViewportCamera,
         Visibility::Hidden,
