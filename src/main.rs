@@ -81,10 +81,30 @@ impl ActiveModule {
     }
 }
 
+/// Frequency band each module is driven across, in Hz.
+///
+/// Chladni figures and Faraday waves are audible phenomena, so Granular and
+/// Fluid sweep the full 20 Hz–20 kHz range. The acoustic module is an
+/// ultrasonic levitator: its 4 cm cavity only supports a standing wave from
+/// `c/2L ≈ 4.3 kHz` upward, and the crate's reference regime is ~24 kHz. It
+/// therefore gets its own band, so the whole slider travel stays physically
+/// meaningful instead of doing nothing for most of its length.
+pub fn frequency_range(module: ActiveModule) -> (f32, f32) {
+    match module {
+        ActiveModule::Granular | ActiveModule::Fluid => (20.0, 20_000.0),
+        ActiveModule::Acoustic => (5_000.0, 40_000.0),
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct SimState {
     pub granular_data: Option<Vec<cymatrox::granular::GranularData>>,
     pub acoustic_data: Option<Vec<cymatrox::acoustic::AcousticPressureNode>>,
+    /// Running time-average of the acoustic pressure squared (p² EMA). The
+    /// solver reports the *instantaneous* pressure, which oscillates at the
+    /// drive frequency; the renderer draws this energy field instead so the
+    /// levitation figure is a single stable image rather than a flicker.
+    pub acoustic_energy: Vec<f32>,
     pub status: String,
     pub error: bool,
 }
@@ -236,7 +256,10 @@ fn poll_voice(voice_rx: Res<VoiceReceiver>, mut ui_state: ResMut<UiState>) {
         ui_state.voice_rms = data.amplitude;
 
         if ui_state.voice_control && data.frequency_hz.is_finite() {
-            ui_state.frequency_hz = data.frequency_hz.clamp(20.0, 20_000.0);
+            // Keep the sung frequency inside whatever band the active module
+            // actually accepts (the acoustic band is ultrasonic).
+            let (fmin, fmax) = frequency_range(ui_state.active_module);
+            ui_state.frequency_hz = data.frequency_hz.clamp(fmin, fmax);
         }
     }
 }
@@ -249,6 +272,17 @@ fn poll_sim_data(data_rx: Res<sim::SimDataReceiver>, mut sim_state: ResMut<SimSt
                 sim_state.error = false;
             }
             sim::SimData::Acoustic(frame) => {
+                // Low-pass p² into a stable energy field. The solver's own EMA
+                // only feeds the Gor'kov force; the pressure it reports is the
+                // instantaneous oscillation, which would strobe on screen.
+                const ALPHA: f32 = 0.15;
+                if sim_state.acoustic_energy.len() != frame.len() {
+                    sim_state.acoustic_energy = vec![0.0; frame.len()];
+                }
+                for (acc, node) in sim_state.acoustic_energy.iter_mut().zip(frame.iter()) {
+                    let p2 = node.pressure_pa * node.pressure_pa;
+                    *acc += ALPHA * (p2 - *acc);
+                }
                 sim_state.acoustic_data = Some(frame);
                 sim_state.error = false;
             }
@@ -325,6 +359,12 @@ fn sync_module_switch(
             }
             _ => {}
         }
+        // A frequency tuned on one module can sit outside the next module's
+        // band (e.g. a 24 kHz acoustic setting when switching to the audible
+        // Granular view). Snap it into range so the slider, ruler and solver
+        // always agree.
+        let (fmin, fmax) = frequency_range(ui_state.active_module);
+        ui_state.frequency_hz = ui_state.frequency_hz.clamp(fmin, fmax);
         if let Err(crossbeam_channel::TrySendError::Disconnected(_)) =
             sim_control.switch_tx.try_send(ui_state.active_module)
         {

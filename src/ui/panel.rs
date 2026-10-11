@@ -54,7 +54,13 @@ pub fn ui_panel(
                 });
         });
 
-    draw_frequency_ruler(ctx, ui_state.frequency_hz, viewport, total);
+    draw_frequency_ruler(
+        ctx,
+        ui_state.frequency_hz,
+        ui_state.active_module,
+        viewport,
+        total,
+    );
     draw_stage_caption(ctx, ui_state.active_module, viewport, total, fluid_zoom.0);
 
     Ok(())
@@ -120,11 +126,13 @@ fn draw_stage_caption(
 }
 
 /// Frequency ruler across the bottom of the visualisation area, mirroring the
-/// mock-up: a log10 scale from 20 Hz to 20 kHz with a tick strip, scale labels
-/// and an accent marker (plus its label) at the current frequency.
+/// mock-up: a log10 scale labelled at 0% / 33.3% / 66.6% / 100% of the active
+/// module's band, with a tick strip, scale labels and an accent marker (plus
+/// its label) at the current frequency.
 fn draw_frequency_ruler(
     ctx: &egui::Context,
     frequency_hz: f32,
+    active_module: ActiveModule,
     viewport: egui::Rect,
     panel_total: f32,
 ) {
@@ -162,25 +170,30 @@ fn draw_frequency_ruler(
         x += 8.0;
     }
 
-    // Scale labels at 0% / 33.3% / 66.6% / 100% (log positions of 20/200/2k/20k).
+    // The band depends on the module: audible for Granular/Fluid, ultrasonic
+    // for the levitation cell. Labels sit at the band's log thirds (which land
+    // exactly on 20/200/2k/20k and 5k/10k/20k/40k for the two bands).
+    let (fmin, fmax) = crate::frequency_range(active_module);
+    let span = (fmax / fmin).max(1.0);
+    let frac = |f: f32| -> f32 { ((f.max(1e-3) / fmin).log10() / span.log10()).clamp(0.0, 1.0) };
     let row_y = ruler.top() + 46.0;
-    for (text, t, align) in [
-        ("20", 0.0_f32, egui::Align2::LEFT_TOP),
-        ("200", 1.0 / 3.0, egui::Align2::CENTER_TOP),
-        ("2k", 2.0 / 3.0, egui::Align2::CENTER_TOP),
-        ("20k", 1.0, egui::Align2::RIGHT_TOP),
+    for (t, align) in [
+        (0.0_f32, egui::Align2::LEFT_TOP),
+        (1.0 / 3.0, egui::Align2::CENTER_TOP),
+        (2.0 / 3.0, egui::Align2::CENTER_TOP),
+        (1.0, egui::Align2::RIGHT_TOP),
     ] {
         painter.text(
             egui::pos2(ruler.left() + t * ruler.width(), row_y),
             align,
-            text,
+            frequency_tick_label(fmin * span.powf(t)),
             egui::FontId::monospace(10.0),
             TEXT_DIM,
         );
     }
 
-    // Marker at the current frequency. 20 Hz..20 kHz spans three decades.
-    let t = (frequency_hz.clamp(20.0, 20_000.0) / 20.0).log10() / 3.0;
+    // Marker at the current frequency.
+    let t = frac(frequency_hz.clamp(fmin, fmax));
     let mx = ruler.left() + t * ruler.width();
     painter.line_segment(
         [
@@ -204,18 +217,31 @@ fn draw_frequency_ruler(
     painter.galley(label_pos, galley, ACCENT);
 }
 
-/// Formats the marker label like the mock-up: `440 Hz`, `2.5k Hz`, `20k Hz`.
+/// Formats the marker label like the mock-up: `440 Hz`, `2.5k Hz`, `24k Hz`.
 fn frequency_label(frequency_hz: f32) -> String {
-    let f = frequency_hz.clamp(20.0, 20_000.0);
-    if f >= 1000.0 {
-        let k = f / 1000.0;
+    if frequency_hz >= 1000.0 {
+        let k = frequency_hz / 1000.0;
         if (k.round() - k).abs() < 0.05 {
             format!("{k:.0}k Hz")
         } else {
             format!("{k:.1}k Hz")
         }
     } else {
-        format!("{f:.0} Hz")
+        format!("{frequency_hz:.0} Hz")
+    }
+}
+
+/// Short scale label for the ruler (`20`, `200`, `2k`, `20k`, `5k`...).
+fn frequency_tick_label(frequency_hz: f32) -> String {
+    if frequency_hz >= 1000.0 {
+        let k = frequency_hz / 1000.0;
+        if (k.round() - k).abs() < 0.05 {
+            format!("{k:.0}k")
+        } else {
+            format!("{k:.1}k")
+        }
+    } else {
+        format!("{frequency_hz:.0}")
     }
 }
 
@@ -286,7 +312,13 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
     // Control
     widgets::section_label(ui, "CONTROL");
     ui.add_space(8.0);
-    widgets::big_readout(ui, &format!("{:.1}", ui_state.frequency_hz), "Hz");
+    let (fmin, fmax) = crate::frequency_range(ui_state.active_module);
+    let freq_text = if ui_state.frequency_hz >= 1000.0 {
+        format!("{:.0}", ui_state.frequency_hz)
+    } else {
+        format!("{:.1}", ui_state.frequency_hz)
+    };
+    widgets::big_readout(ui, &freq_text, "Hz");
     ui.add_space(14.0);
 
     let mut frequency = ui_state.frequency_hz;
@@ -294,7 +326,7 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
         ui,
         None,
         &mut frequency,
-        20.0..=20_000.0,
+        fmin..=fmax,
         "",
         "",
         ACCENT,

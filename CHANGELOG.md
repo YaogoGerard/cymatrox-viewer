@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Acoustic levitation: a legible, frequency-dependent figure
+
+The acoustic module looked *broken*: the shared 20 Hz–20 kHz slider spent most of its travel below the 4 cm cavity's `c/2L ≈ 4.3 kHz` fundamental, the figure took ~30 s to appear, and once it did it rendered as a uniform glow that barely changed with frequency. The causes and fixes:
+
+- **Ultrasonic band**: the levitation cell now sweeps **5–40 kHz** (its own `frequency_range`), so the whole slider travel is physically meaningful; the parameter sanitizer and the voice-control clamp follow. The ruler, scale labels and readout are band-aware (`5k / 10k / 20k / 40k`)
+- **~3.75× faster settle**: `dt` was raised from the crate's conservative `4e-7 s` to `1.5e-6 s` (the CFL bound for the 32³ / 4 cm grid is ~2.1 µs), and `averaging_periods` from 8 to 3. GPU work per step is `dt`-independent, so the same readback rate advances far more simulated time — the standing wave settles in ~8 s instead of ~30 s. The step *rate* stays at the proven 60/s: higher rates starve the iGPU, so the blocking `send` back-pressure (rather than a non-blocking `try_send`) is kept
+- **Single stable figure**: the solver reports the *instantaneous* pressure, which flips sign every half period. The viewer now draws a running **energy field** (p² EMA, α = 0.15) instead of the signed pressure, so the figure no longer strobes
+- **Per-frame normalisation**: the undamped cavity keeps building pressure, so the old fixed colour reference saturated the whole chamber to full brightness. The volume is now normalised by its own per-frame RMS peak (floor 0.05 Pa), keeping the lobe/node ratio readable at any field level
+- **The camera was staring down the band axis**: the default 3/4 orbit looked straight along the transducer axis, so the axial standing-wave bands projected onto each other and read as a solid mass. The default camera now looks **perpendicular** to that axis (yaw 0 with a slight top-down pitch), which reveals the nodal planes — an axial mode such as `(8,0,0)` at 34.3 kHz shows clean vertical bands, while a detuned drive reads as a filled diffuse field
+- Voxel samples now land **on** the grid nodes (they previously sampled the half-steps *between* nodes, exactly where a standing wave's contrast is washed out), and the colour ramp drops cells below half the per-frame peak so the lobes read as sheets rather than one glow
+
 ### Fluid: a legible CymaScope figure
 
 The pool rendered as a smooth bright dome rather than a CymaScope. At the default 60 Hz the dish selects a 10-petal, ~6-ring Faraday mode, but the display could not show it:

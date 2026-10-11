@@ -20,6 +20,11 @@ pub mod granular;
 /// backlog cap below keeps a slow GPU from spiralling (it simply self-limits to
 /// whatever rate the device sustains).
 const GRANULAR_STEPS_PER_SEC: f64 = 240.0;
+/// The acoustic solver integrates one `dt = 1.5e-6 s` per `step()` (see
+/// `acoustic::default_config`), so 60 steps/s advances the levitation cell
+/// ~3.75x faster than the crate's reference pacing while keeping the readback
+/// rate low enough for the renderer to keep up on the UHD 630 iGPU (higher
+/// rates starve rendering — verified experimentally).
 const ACOUSTIC_STEPS_PER_SEC: f64 = 60.0;
 
 /// Largest backlog of simulation steps the accumulator may hold. Without this
@@ -73,7 +78,10 @@ impl SimParams {
             }
         };
         Self {
-            frequency_hz: sanitize(self.frequency_hz, g.experiment.frequency_hz, 20.0, 20_000.0),
+            // Upper bound is the acoustic module's ultrasonic band (see
+            // `crate::frequency_range`); the audible modules clamp lower in the
+            // UI, so this only has to be a safety net against bad input.
+            frequency_hz: sanitize(self.frequency_hz, g.experiment.frequency_hz, 20.0, 40_000.0),
             amplitude: sanitize(self.amplitude, 0.0, 0.0, 1.0),
             drag: sanitize(self.drag, g.solver.drag, 0.0, 20.0),
             restitution: sanitize(self.restitution, g.solver.restitution, 0.0, 1.0),
@@ -465,6 +473,10 @@ fn spawn_master(
                 }
 
                 if let Some(data) = latest {
+                    // Blocking send doubles as the render's back-pressure: when
+                    // the channel is full the sim thread waits, which hands the
+                    // GPU queue back to the renderer. Without it the solver
+                    // would read back continuously and starve rendering.
                     if data_tx.send(data).is_err() {
                         debug!("[sim] UI disconnected, stopping sim thread");
                         break;
@@ -513,7 +525,7 @@ mod tests {
             fluid_damping: 100.0,
         };
         let s = raw.sanitized();
-        assert_eq!(s.frequency_hz, 20_000.0);
+        assert_eq!(s.frequency_hz, 40_000.0);
         assert_eq!(s.amplitude, 1.0);
         assert_eq!(s.drag, 0.0);
         assert_eq!(s.restitution, 1.0);

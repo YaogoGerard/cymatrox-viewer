@@ -29,35 +29,27 @@ fn grid_dim(len: usize) -> usize {
     (((len as f64).cbrt()).round() as usize).max(1)
 }
 
-/// Smooth, low-opacity diverging colormap. p>0 -> red, p<0 -> blue, and
-/// values close to zero are discarded so the volume does not become a stack
-/// of opaque slabs. Returns [r,g,b,a].
-fn pressure_color(p: f32, pmax: f32) -> [f32; 4] {
-    let t = (p / pmax.max(1e-9)).clamp(-1.0, 1.0);
-    let magnitude = t.abs();
-    const CUTOFF: f32 = 0.16;
-    if magnitude <= CUTOFF {
+/// Warm acoustic-energy ramp, fed the already-normalised `t = rms / reference`
+/// from the build loop. Quiet nodes (below `CUTOFF`) are dropped so the nodal
+/// bands read as gaps between bright lobes rather than one solid glow.
+fn energy_color(t: f32) -> [f32; 4] {
+    const CUTOFF: f32 = 0.5;
+    if t <= CUTOFF {
         return [0.0, 0.0, 0.0, 0.0];
     }
-    let a = ((magnitude - CUTOFF) / (1.0 - CUTOFF)).powf(0.7);
-    if p >= 0.0 {
-        // Red compression lobe, with enough transparency to see through it.
-        [0.75 * a, 0.08 * a, 0.04 * a, 0.025 + 0.10 * a]
-    } else {
-        // Blue rarefaction lobe.
-        [0.04 * a, 0.10 * a, 0.65 * a, 0.025 + 0.10 * a]
-    }
+    let a = ((t - CUTOFF) / (1.0 - CUTOFF)).powf(0.85);
+    let lerp = |lo: f32, hi: f32| lo + (hi - lo) * a;
+    [
+        lerp(0.35, 0.99),
+        lerp(0.08, 0.62),
+        lerp(0.12, 0.30),
+        0.02 + 0.07 * a,
+    ]
 }
 
 /// Trilinear sampling of the input grid (row-major, x fastest).
 /// `f` coordinates are in [0, n-1].
-fn sample_trilinear(
-    data: &[cymatrox::acoustic::AcousticPressureNode],
-    n: usize,
-    x: f32,
-    y: f32,
-    z: f32,
-) -> f32 {
+fn sample_trilinear(values: &[f32], n: usize, x: f32, y: f32, z: f32) -> f32 {
     let x0 = (x.floor() as i32).clamp(0, n as i32 - 1) as usize;
     let y0 = (y.floor() as i32).clamp(0, n as i32 - 1) as usize;
     let z0 = (z.floor() as i32).clamp(0, n as i32 - 1) as usize;
@@ -67,11 +59,7 @@ fn sample_trilinear(
     let tx = (x - x0 as f32).clamp(0.0, 1.0);
     let ty = (y - y0 as f32).clamp(0.0, 1.0);
     let tz = (z - z0 as f32).clamp(0.0, 1.0);
-    let at = |x: usize, y: usize, z: usize| {
-        data.get(x + n * (y + n * z))
-            .map(|d| d.pressure_pa)
-            .unwrap_or(0.0)
-    };
+    let at = |x: usize, y: usize, z: usize| values.get(x + n * (y + n * z)).copied().unwrap_or(0.0);
     let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
     // Interpolate along x on each of the 4 edges of the block, then y, then z.
     let c00 = lerp(at(x0, y0, z0), at(x1, y0, z0), tx);
@@ -83,24 +71,28 @@ fn sample_trilinear(
     lerp(c0, c1, tz)
 }
 
-/// Fixed colour reference (pascals). The volume used to be normalised by the
-/// per-frame maximum pressure, which pinned the display to full brightness
-/// every frame and made the drive amplitude invisible. A constant reference
-/// means brightness now tracks the actual field: stronger drive = brighter,
-/// weaker field = dimmer, and the two can finally be compared.
-const PRESSURE_REFERENCE_PA: f32 = 1.0;
-
 /// Build a sparse voxel cloud. Disconnected, softly transparent cells make
 /// pressure variations read as a gas density instead of stacked cut planes.
-fn build_volume_mesh(data: &[cymatrox::acoustic::AcousticPressureNode], n: usize) -> Mesh {
+/// `values` is the RMS energy field; the colormap is normalised by its own
+/// per-frame peak.
+fn build_volume_mesh(values: &[f32], n: usize) -> Mesh {
     let half = WORLD_HALF;
-    let pmax = PRESSURE_REFERENCE_PA;
+    // Per-frame normalisation: the undamped cavity keeps building pressure, so
+    // a constant reference eventually saturates the whole chamber to full
+    // brightness. Normalising by the current peak keeps the lobe/node ratio
+    // readable regardless of how large the field has grown. The floor keeps
+    // the pre-noise state dark instead of glowing.
+    let peak = values.iter().copied().fold(0.0f32, f32::max);
+    let reference = peak.max(0.05);
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut colors: Vec<[f32; 4]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
-    let cells = n.saturating_sub(1).max(1);
-    let spacing = (2.0 * half) / cells as f32;
+    // One cell per grid node, sampled *at* the node (not between nodes): a
+    // standing wave's node/antinode contrast only survives if the samples land
+    // on the field grid. Sampling at half-steps averaged the bands away.
+    let cells = n.max(2);
+    let spacing = (2.0 * half) / (cells - 1) as f32;
     let cell_size = spacing * 0.68;
     let faces = [
         (
@@ -149,18 +141,18 @@ fn build_volume_mesh(data: &[cymatrox::acoustic::AcousticPressureNode], n: usize
     for ix in 0..cells {
         for iy in 0..cells {
             for iz in 0..cells {
-                let sx = (ix as f32 + 0.5) / cells as f32 * (n as f32 - 1.0);
-                let sy = (iy as f32 + 0.5) / cells as f32 * (n as f32 - 1.0);
-                let sz = (iz as f32 + 0.5) / cells as f32 * (n as f32 - 1.0);
-                let pressure = sample_trilinear(data, n, sx, sy, sz);
-                let color = pressure_color(pressure, pmax);
+                let sx = ix as f32;
+                let sy = iy as f32;
+                let sz = iz as f32;
+                let rms = sample_trilinear(values, n, sx, sy, sz);
+                let color = energy_color(rms / reference.max(1e-9));
                 if color[3] == 0.0 {
                     continue;
                 }
                 let center = [
-                    -half + (ix as f32 + 0.5) * spacing,
-                    -half + (iy as f32 + 0.5) * spacing,
-                    -half + (iz as f32 + 0.5) * spacing,
+                    -half + ix as f32 * spacing,
+                    -half + iy as f32 * spacing,
+                    -half + iz as f32 * spacing,
                 ];
                 for (a, b, c, d, normal) in faces {
                     let base = positions.len() as u32;
@@ -235,11 +227,11 @@ pub fn setup_acoustic_scene(
             clear_color: ClearColorConfig::Custom(crate::render::STAGE_BG),
             ..default()
         },
-        Transform::from_xyz(2.6, 1.7, 2.6).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(0.0, 1.15, 3.4).looking_at(Vec3::ZERO, Vec3::Y),
         PanOrbitCamera {
             focus: Vec3::ZERO,
-            yaw: Some(-0.75),
-            pitch: Some(0.5),
+            yaw: Some(0.0),
+            pitch: Some(0.32),
             button_orbit: MouseButton::Left,
             button_pan: MouseButton::Right,
             button_zoom: Some(MouseButton::Middle),
@@ -408,6 +400,11 @@ pub fn update_acoustic_points(
     let Some(data) = &sim_state.acoustic_data else {
         return;
     };
+    // The volume is drawn from the time-averaged energy field (stable), not
+    // the instantaneous pressure the solver reports.
+    if sim_state.acoustic_energy.is_empty() {
+        return;
+    }
 
     let Ok(mesh3d) = query.single_mut() else {
         warn!("[acoustic] no AcousticVolume entity found");
@@ -426,14 +423,15 @@ pub fn update_acoustic_points(
         .map(|t| now.duration_since(*t) >= std::time::Duration::from_secs(1))
         .unwrap_or(true);
     if do_log {
-        let pmax = data
+        let rms_max = sim_state
+            .acoustic_energy
             .iter()
-            .map(|d| d.pressure_pa.abs())
+            .map(|e| e.sqrt())
             .fold(0.0f32, f32::max);
         debug!(
-            "[acoustic] update: {} nodes, |p|max={:.4} Pa",
-            data.len(),
-            pmax
+            "[acoustic] update: {} nodes, |p|={:.4} Pa rms",
+            sim_state.acoustic_energy.len(),
+            rms_max
         );
         frame.last_log = Some(now);
     }
@@ -446,8 +444,10 @@ pub fn update_acoustic_points(
         .map(|t| now.duration_since(*t) >= std::time::Duration::from_millis(50))
         .unwrap_or(true);
     if due {
-        let n = grid_dim(data.len());
-        *mesh = build_volume_mesh(data, n);
+        let n = grid_dim(sim_state.acoustic_energy.len());
+        // sqrt(p²_avg) = RMS pressure, the scalar the colormap expects.
+        let rms: Vec<f32> = sim_state.acoustic_energy.iter().map(|e| e.sqrt()).collect();
+        *mesh = build_volume_mesh(&rms, n);
         frame.last_rebuild = Some(now);
     }
 
