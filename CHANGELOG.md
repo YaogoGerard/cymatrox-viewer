@@ -10,7 +10,7 @@ The pool rendered as a smooth bright dome rather than a CymaScope. At the defaul
 
 - **Resolution**: the polar water mesh was 36 rings × 120 segments, which aliased the radial nodal circles away — and the top of the audio range carries ~40 rings. Now 220 × 256, sampling the glyph on a 512² field (up from 256²)
 - **Slope normalisation**: the displayed relief is scaled per frame so its *steepest slope* — not its peak height — is constant. A fixed height turned the high-order modes into a spiky fence; a bounded aspect keeps every tone reading as water (a few big waves at low pitch, a fine shimmer at the top)
-- **Caustic + height shading**: the water is now drawn *unlit* from a baked per-vertex colour — the wave height leads (bright crests over dark troughs) with a mirror caustic where the slope reflects the key into the overhead camera — instead of a near-mirror reflecting a smooth environment gradient, which washed the figure into an unreadable mid-tone
+- **Light-ring reflection**: the water is now drawn *unlit* from a baked per-vertex colour, shaded the way the instrument actually captures a cymaglyph — a coaxial **ring light** seen from straight overhead. A patch of surface glints where its tilt bends the view ray out to the ring (a contour of the wave *slope*), so the bright nodal lines and petals stand on dark water; a faint height term keeps the whole figure readable, plus slope-driven froth and a lit meniscus. This replaces the earlier crest-height + single directional caustic, which read as a painted height map rather than lit water
 - The mesh is rebuilt only while the figure cross-fades and then frozen, so the finer tessellation costs nothing once a tone has settled
 
 ### Physically-lit realism pass (all three modules)

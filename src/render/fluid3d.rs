@@ -76,15 +76,19 @@ const GRID_OUT: usize = 512;
 const DISC_RINGS: usize = 220;
 const DISC_SEGMENTS: usize = 256;
 
-/// Euler angles of the dedicated raking key that lights the pool. Kept in one
-/// place so the caustic baked in `water_vertex` shares the light's own
-/// direction instead of hard-coding a second one.
+/// Euler angles of the dedicated key that lights the brushed-metal instrument on
+/// the liquid layer. The water itself is shaded by the light ring below.
 const KEY_EULER: (f32, f32, f32) = (-1.02, 0.55, 0.0);
 
-/// Exponent of the mirror caustic that draws the bright light lines. Higher is
-/// thinner and brighter; too high and the lines break up into disconnected
-/// glints on a coarse mesh.
-const CAUSTIC_EXP: f32 = 30.0;
+/// Geometry of the coaxial light-ring illuminator the pool is photographed with
+/// (the classic CymaScope arrangement): a ring of light above the water, viewed
+/// straight down. A patch of surface glints when its tilt reflects the view ray
+/// into the ring, so the bright lines trace contours of the wave *slope* — which
+/// is exactly what a CymaGlyph is. `RING_ELEV` is the ring's elevation above the
+/// horizon and `RING_SIGMA` the angular width of the highlight lobe: bigger is
+/// a softer, wider glow (a fatter ring / rougher water).
+const RING_ELEV: f32 = 0.82;
+const RING_SIGMA: f32 = 0.17;
 
 /// Zoom on the scope (mouse wheel). `1.0` is the fitted default framing; larger
 /// values move the camera closer. Lives in a resource because both the fit and
@@ -547,23 +551,17 @@ pub fn update_fluid_mesh(
     }
 }
 
-/// World-space unit vector pointing from the pool surface toward the raking key,
-/// reconstructed from the light's own transform so the baked relief term and the
-/// physical shading agree on which way the light comes from.
-fn key_to_light() -> Vec3 {
-    (Quat::from_euler(EulerRot::XYZ, KEY_EULER.0, KEY_EULER.1, KEY_EULER.2) * Vec3::Z).normalize()
-}
-
 /// Samples the display field at a plate position and returns the displaced
-/// position, the surface normal (from field gradients) and the surface albedo.
+/// position, the surface normal (from field gradients) and the surface colour.
 ///
-/// The water is drawn **unlit**, so the whole look is baked here: the wave
-/// *height* leads (bright crests over dark troughs, which is what makes the
-/// Faraday figure legible), over a dark body whose nodal network carries the
-/// contrast; a tight mirror *caustic* then brightens the slopes that reflect the
-/// key into the overhead camera, like a real vibrating water surface. Froth
-/// whitens the steepest crests and a brighter meniscus marks the film climbing
-/// the dish wall.
+/// The water is drawn **unlit**, so the whole CymaGlyph is baked here, following
+/// how the instrument actually captures one: an ultra-pure water surface viewed
+/// from straight above and lit by a coaxial **ring light**, so the picture is
+/// essentially the *reflection* of that ring. The reflection fires wherever the
+/// surface tilts strongly enough to bend the view ray out to the ring — a
+/// contour of the wave slope — which is what draws the bright nodal lines and
+/// petals over an otherwise dark pool. Froth whitens the steepest crests and a
+/// brighter meniscus marks the film climbing the dish wall.
 fn water_vertex(
     x: f32,
     z: f32,
@@ -590,24 +588,24 @@ fn water_vertex(
     // The meniscus where the water climbs the wall catches the light.
     let glass = smoothstep(0.90, 1.0, (x * x + z * z).sqrt() / PLATE_R);
 
-    // Surface shading. The legible part of a CymaScope figure is the wave
-    // itself — bright crests over dark troughs — so the height leads, with a
-    // dark body so the nodal network carries contrast instead of a mid-tone
-    // wash. On top sits the mirror caustic: the slopes that reflect the key
-    // into the overhead camera, drawn as brighter lines where the surface tips
-    // to the half-vector. The result is a lit, rippling water surface rather
-    // than a flat height map.
-    let to_light = key_to_light();
-    let half = (to_light + Vec3::Y).normalize();
-    let caustic = n.dot(half).max(0.0).powf(CAUSTIC_EXP);
-    let crest = (h / (hscale * ref_abs).max(1e-12)).clamp(-1.0, 1.0) * 0.5 + 0.5;
-    let lit = 0.05 + 0.95 * crest;
+    // Coaxial light-ring reflection. A flat patch sends the view ray straight
+    // back up (reflected elevation 90°); tilting the surface by θ lowers it to
+    // 90° − 2θ. So the ring at `RING_ELEV` is caught where the wave slope
+    // reaches (90° − RING_ELEV)/2, and the highlight follows that slope contour.
+    let theta = n.y.clamp(-1.0, 1.0).acos();
+    let reflected_elev = std::f32::consts::FRAC_PI_2 - 2.0 * theta;
+    let d = reflected_elev - RING_ELEV;
+    let glint = (-(d * d) / (RING_SIGMA * RING_SIGMA)).exp();
 
-    let deep = Vec3::new(0.28, 0.42, 0.56) * lit;
+    // The illuminated water: a dark body that still carries a faint image of the
+    // wave (so the whole figure reads, not only where it catches the ring), with
+    // the ring reflection added on top as the bright, near-white cymascope lines.
+    let crest = (h / (hscale * ref_abs).max(1e-12)).clamp(-1.0, 1.0) * 0.5 + 0.5;
+    let deep = Vec3::new(0.10, 0.17, 0.24) * (0.18 + 0.82 * crest);
     let col = deep
-        + Vec3::splat(1.7) * caustic * (0.30 + 0.70 * crest)
-        + Vec3::new(0.50, 0.57, 0.66) * foam
-        + Vec3::splat(0.20) * glass;
+        + Vec3::new(0.95, 1.00, 1.08) * glint
+        + Vec3::new(0.45, 0.52, 0.60) * foam
+        + Vec3::new(0.18, 0.22, 0.26) * glass;
 
     ([x, h, z], [n.x, n.y, n.z], [col.x, col.y, col.z, 1.0])
 }
