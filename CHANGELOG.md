@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fluid: a legible CymaScope figure
+
+The pool rendered as a smooth bright dome rather than a CymaScope. At the default 60 Hz the dish selects a 10-petal, ~6-ring Faraday mode, but the display could not show it:
+
+- **Resolution**: the polar water mesh was 36 rings × 120 segments, which aliased the radial nodal circles away — and the top of the audio range carries ~40 rings. Now 220 × 256, sampling the glyph on a 512² field (up from 256²)
+- **Slope normalisation**: the displayed relief is scaled per frame so its *steepest slope* — not its peak height — is constant. A fixed height turned the high-order modes into a spiky fence; a bounded aspect keeps every tone reading as water (a few big waves at low pitch, a fine shimmer at the top)
+- **Caustic + height shading**: the water is now drawn *unlit* from a baked per-vertex colour — the wave height leads (bright crests over dark troughs) with a mirror caustic where the slope reflects the key into the overhead camera — instead of a near-mirror reflecting a smooth environment gradient, which washed the figure into an unreadable mid-tone
+- The mesh is rebuilt only while the figure cross-fades and then frozen, so the finer tessellation costs nothing once a tone has settled
+
 ### Physically-lit realism pass (all three modules)
 
 Every module is now lit with real PBR materials behind one shared cinematic post-stack, instead of flat baked colour:

@@ -45,12 +45,15 @@ const HAIRLINE_OUTER: f32 = 3.026;
 const N_TICKS: usize = 72;
 const CARDINAL_EVERY: usize = 6;
 
-/// Target peak of the displayed relief, in world units. The analytic glyph is
-/// normalised per frame so its tallest feature always reaches this height:
-/// otherwise the physical amplitude (tens of micrometres) is so far below the
-/// dish radius that the surface is optically flat and real lighting has nothing
-/// to catch. `MAX_DISPLAY_HEIGHT` still guards the extremes.
-const DISPLAY_TARGET_HEIGHT: f32 = 0.32;
+/// Target maximum *slope* of the displayed relief (dimensionless, dy/dx in
+/// world units). The glyph is normalised per frame so its steepest slope always
+/// reaches this value. Normalising the slope rather than the peak height is what
+/// keeps the pool reading as water at every tone: a low tone throws a few big
+/// waves, a high tone a fine shimmer, instead of the high-order modes (two
+/// dozen nodal rings at 440 Hz) turning into a spiky fence. The physical
+/// Faraday amplitude is itself only a small fraction of the wavelength, so a
+/// bounded aspect ratio is also the physical choice.
+const TARGET_SLOPE: f32 = 1.05;
 /// Floor of the live slope reference (display units) used to autoscale the
 /// froth response. A calm pool stays dark instead of amplifying noise.
 const MIN_SLOPE_REF: f32 = 0.05;
@@ -59,15 +62,29 @@ const MIN_SLOPE_REF: f32 = 0.05;
 /// remain unchanged in the simulation.
 const MAX_DISPLAY_HEIGHT: f32 = 0.5;
 /// Layout grid resolution used to sample the Faraday field. The analytic glyph
-/// carries several tens of nodal rings at the top of the audio range, so this is
-/// much finer than the old solver readback grid.
-const GRID_OUT: usize = 256;
+/// carries several tens of nodal rings at the top of the audio range (about
+/// forty at 1 kHz), so this must resolve well under a ring spacing: at 512 the
+/// finest mode is sampled with ~5 cells per nodal ring, which the bilinear
+/// lookup then smooths.
+const GRID_OUT: usize = 512;
 
 /// Water disc tessellation: concentric rings of vertices, uniform angular
 /// resolution. A polar mesh gives a clean circular pool edge (a square grid
-/// would leave flat corners sticking out around the dish).
-const DISC_RINGS: usize = 36;
-const DISC_SEGMENTS: usize = 120;
+/// would leave flat corners sticking out around the dish). The ring count has
+/// to resolve the finest radial mode (~40 nodal rings at 1 kHz), hence the
+/// generous figure; the segment count only has to resolve the azimuthal petals.
+const DISC_RINGS: usize = 220;
+const DISC_SEGMENTS: usize = 256;
+
+/// Euler angles of the dedicated raking key that lights the pool. Kept in one
+/// place so the caustic baked in `water_vertex` shares the light's own
+/// direction instead of hard-coding a second one.
+const KEY_EULER: (f32, f32, f32) = (-1.02, 0.55, 0.0);
+
+/// Exponent of the mirror caustic that draws the bright light lines. Higher is
+/// thinner and brighter; too high and the lines break up into disconnected
+/// glints on a coarse mesh.
+const CAUSTIC_EXP: f32 = 30.0;
 
 /// Zoom on the scope (mouse wheel). `1.0` is the fitted default framing; larger
 /// values move the camera closer. Lives in a resource because both the fit and
@@ -83,6 +100,10 @@ pub struct FluidDisplayState {
     field: Vec<f32>,
     target: Vec<f32>,
     key: [u32; 4],
+    /// Set once the smoothed field has settled onto the current glyph: the mesh
+    /// then stops being rebuilt every frame (the pool is static until the tone
+    /// changes), which keeps the fine tessellation free at rest.
+    converged: bool,
 }
 
 pub fn setup_fluid_scene(
@@ -100,15 +121,15 @@ pub fn setup_fluid_scene(
     commands.spawn((
         Camera3d::default(),
         crate::render::cinematic(),
-        // A generated studio environment (no asset needed): the water is a
-        // near-mirror surface, so it needs something to reflect. Bright at the
-        // zenith, falling to a dark nadir — the reflected sky gradient is what
-        // makes the pool read as liquid instead of a black disc.
+        // A generated studio environment (no asset needed): the brushed-metal
+        // instrument on this camera needs something to reflect. Bright at the
+        // zenith, falling to a dark nadir, and kept restrained so it never
+        // competes with the baked cymascope figure.
         EnvironmentMapLight::hemispherical_gradient(
             &mut images,
-            Color::srgb(0.62, 0.72, 0.88),
-            Color::srgb(0.10, 0.14, 0.20),
-            Color::srgb(0.012, 0.016, 0.024),
+            Color::srgb(0.34, 0.41, 0.53),
+            Color::srgb(0.06, 0.08, 0.12),
+            Color::srgb(0.008, 0.011, 0.016),
         ),
         Projection::from(OrthographicProjection {
             scaling_mode: ScalingMode::WindowSize,
@@ -131,17 +152,22 @@ pub fn setup_fluid_scene(
         LAYER,
     ));
 
-    // A dedicated key for the liquid layer: a low-angle (raking) beam so the
-    // wave slopes catch the light and the relief reads through real shading and
-    // specular highlights instead of a baked colour. Illuminance is high because
-    // the disc is a dark, low-roughness dielectric that mostly reflects.
+    // A dedicated key on the liquid layer. The water itself is unlit — its
+    // figure is baked (`water_vertex`) — but this light shades the brushed-metal
+    // instrument, and its direction is the one the caustic baking treats as the
+    // light coming into the pool.
     commands.spawn((
         DirectionalLight {
             illuminance: 14_000.0,
             color: Color::srgb(0.94, 0.97, 1.0),
             ..default()
         },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.02, 0.55, 0.0)),
+        Transform::from_rotation(Quat::from_euler(
+            EulerRot::XYZ,
+            KEY_EULER.0,
+            KEY_EULER.1,
+            KEY_EULER.2,
+        )),
         RenderLayers::layer(2),
     ));
 
@@ -160,16 +186,16 @@ pub fn setup_fluid_scene(
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
 
-    // Water: a dark, low-roughness dielectric. Its albedo (including slope-based
-    // froth on the steepest crests) is carried per-vertex, so the material base
-    // colour stays white; the *brightness* now comes from a physically-lit
-    // surface — the raking key's diffuse + specular on the wave normals plus the
-    // reflected environment map, which is exactly the signal a CymaScope records.
+    // Water: the figure is baked per-vertex (see `water_vertex`) and drawn
+    // unlit, so the material keeps its base colour white and simply shows the
+    // authored crest/caustic shading. `perceptual_roughness`/`reflectance` are
+    // left at sensible values for the (unused) lit path.
     let mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         metallic: 0.0,
-        perceptual_roughness: 0.12,
-        reflectance: 0.55,
+        perceptual_roughness: 0.28,
+        reflectance: 0.35,
+        unlit: true,
         cull_mode: None,
         ..default()
     });
@@ -413,6 +439,7 @@ pub fn update_fluid_mesh(
         field: vec![0.0; GRID_OUT * GRID_OUT],
         target: vec![0.0; GRID_OUT * GRID_OUT],
         key: [u32::MAX; 4],
+        converged: false,
     });
 
     // The placed figure is the analytic Faraday glyph for the current tone,
@@ -436,6 +463,10 @@ pub fn update_fluid_mesh(
             &mut st.target,
         );
         st.key = key;
+        st.converged = false;
+    }
+    if st.converged {
+        return;
     }
 
     {
@@ -457,8 +488,11 @@ pub fn update_fluid_mesh(
 
     // Time-smooth the display field toward the glyph, so a tone change
     // cross-fades the previous figure into the new one.
+    let mut max_delta = 0.0f32;
     for (smoothed, goal) in st.field.iter_mut().zip(st.target.iter()) {
-        *smoothed += 0.8 * (*goal - *smoothed);
+        let d = *goal - *smoothed;
+        *smoothed += 0.8 * d;
+        max_delta = max_delta.max(d.abs());
     }
     let hlin: Vec<f32> = st.field.clone();
 
@@ -466,16 +500,20 @@ pub fn update_fluid_mesh(
     // off the high-order modes without erasing the fine nodal network.
     let hlin = smooth_field(&hlin, GRID_OUT);
 
-    // Normalise the displayed relief: the glyph is a physical height field in
-    // metres (tens of micrometres), far too small to shade at the dish scale,
-    // so scale it per frame until its peak reaches `DISPLAY_TARGET_HEIGHT`.
+    // Normalise the displayed relief by its *steepest slope*, not its tallest
+    // peak. The glyph is a physical height field in metres (tens of
+    // micrometres), far too small to shade at the dish scale, so it is
+    // exaggerated — but a constant aspect ratio is what keeps a coarse tone
+    // (a few big waves) and a fine tone (a shimmer of rings) both reading as
+    // water. `MAX_DISPLAY_HEIGHT` still caps a near-singular frame.
     let max_abs = hlin.iter().fold(0.0f32, |a, &b| a.max(b.abs())).max(1e-12);
-    let hscale = DISPLAY_TARGET_HEIGHT / max_abs;
+    let dx_world = 2.0 * PLATE_R / (GRID_OUT as f32 - 1.0);
+    let gmax = max_slope(&hlin, GRID_OUT).max(1e-12);
+    let hscale = (TARGET_SLOPE * dx_world / gmax).min(MAX_DISPLAY_HEIGHT / max_abs);
 
     // Autoscale the froth response to this frame's live slope so a developing
     // glyph reads immediately and a calm pool stays clean.
-    let dx_world = 2.0 * PLATE_R / (GRID_OUT as f32 - 1.0);
-    let slope_ref = (max_slope(&hlin, GRID_OUT) * hscale / dx_world).max(MIN_SLOPE_REF);
+    let slope_ref = (gmax * hscale / dx_world).max(MIN_SLOPE_REF);
 
     // Rebuild the polar disc, sampling the field at each vertex and shading the
     // relief via surface normals.
@@ -484,7 +522,7 @@ pub fn update_fluid_mesh(
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(1 + DISC_RINGS * DISC_SEGMENTS);
 
     let mut push = |x: f32, z: f32| {
-        let (p, n, c) = water_vertex(x, z, &hlin, slope_ref, hscale);
+        let (p, n, c) = water_vertex(x, z, &hlin, slope_ref, hscale, max_abs);
         positions.push(p);
         normals.push(n);
         colors.push(c);
@@ -501,22 +539,38 @@ pub fn update_fluid_mesh(
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+
+    // Once the smoothed field has essentially arrived at the glyph, freeze:
+    // nothing animates until the tone (or the liquid) changes.
+    if max_delta <= 1e-4 * max_abs {
+        st.converged = true;
+    }
+}
+
+/// World-space unit vector pointing from the pool surface toward the raking key,
+/// reconstructed from the light's own transform so the baked relief term and the
+/// physical shading agree on which way the light comes from.
+fn key_to_light() -> Vec3 {
+    (Quat::from_euler(EulerRot::XYZ, KEY_EULER.0, KEY_EULER.1, KEY_EULER.2) * Vec3::Z).normalize()
 }
 
 /// Samples the display field at a plate position and returns the displaced
 /// position, the surface normal (from field gradients) and the surface albedo.
 ///
-/// With the surface now physically lit, this no longer bakes the ring-light
-/// pattern: the brightness comes from the raking key and the reflected
-/// environment acting on the normal. What the albedo carries is the *material*
-/// of the water — a deep, dark blue body, a little white froth on the steepest
-/// crests, and a brighter meniscus where the film climbs the dish wall.
+/// The water is drawn **unlit**, so the whole look is baked here: the wave
+/// *height* leads (bright crests over dark troughs, which is what makes the
+/// Faraday figure legible), over a dark body whose nodal network carries the
+/// contrast; a tight mirror *caustic* then brightens the slopes that reflect the
+/// key into the overhead camera, like a real vibrating water surface. Froth
+/// whitens the steepest crests and a brighter meniscus marks the film climbing
+/// the dish wall.
 fn water_vertex(
     x: f32,
     z: f32,
     field: &[f32],
     slope_ref: f32,
     hscale: f32,
+    ref_abs: f32,
 ) -> ([f32; 3], [f32; 3], [f32; 4]) {
     let h = displayed_height_at(x, z, field, hscale);
     let eps = PLATE_R / DISC_RINGS as f32;
@@ -536,9 +590,24 @@ fn water_vertex(
     // The meniscus where the water climbs the wall catches the light.
     let glass = smoothstep(0.90, 1.0, (x * x + z * z).sqrt() / PLATE_R);
 
-    // Deep water body, faintly cool, with froth and meniscus brightening it.
-    let deep = Vec3::new(0.035, 0.075, 0.11);
-    let col = deep + Vec3::new(0.55, 0.62, 0.70) * foam + Vec3::splat(0.20) * glass;
+    // Surface shading. The legible part of a CymaScope figure is the wave
+    // itself — bright crests over dark troughs — so the height leads, with a
+    // dark body so the nodal network carries contrast instead of a mid-tone
+    // wash. On top sits the mirror caustic: the slopes that reflect the key
+    // into the overhead camera, drawn as brighter lines where the surface tips
+    // to the half-vector. The result is a lit, rippling water surface rather
+    // than a flat height map.
+    let to_light = key_to_light();
+    let half = (to_light + Vec3::Y).normalize();
+    let caustic = n.dot(half).max(0.0).powf(CAUSTIC_EXP);
+    let crest = (h / (hscale * ref_abs).max(1e-12)).clamp(-1.0, 1.0) * 0.5 + 0.5;
+    let lit = 0.05 + 0.95 * crest;
+
+    let deep = Vec3::new(0.28, 0.42, 0.56) * lit;
+    let col = deep
+        + Vec3::splat(1.7) * caustic * (0.30 + 0.70 * crest)
+        + Vec3::new(0.50, 0.57, 0.66) * foam
+        + Vec3::splat(0.20) * glass;
 
     ([x, h, z], [n.x, n.y, n.z], [col.x, col.y, col.z, 1.0])
 }
