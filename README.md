@@ -59,6 +59,13 @@ Override default filters with the `RUST_LOG` environment variable (same syntax a
 RUST_LOG=warn,cymatrox_viewer=info cargo run --release
 ```
 
+## Documentation
+
+Architecture and design notes live in [`docs/`](./docs/overview.md). They are
+meant to be read in order — **Overview → Architecture → Runtime → Data flow →
+Simulation → Rendering → UI → Decision records → Glossary** — starting at
+[`docs/overview.md`](./docs/overview.md); each page links to the next.
+
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for prerequisites, the check commands CI enforces, and the project layout.
