@@ -42,6 +42,26 @@ Download the file for your platform from the [latest release](https://github.com
 | macOS (Apple Silicon) | `Cymatrox.Viewer_*_aarch64.dmg` | Open the DMG and drag **Cymatrox Viewer** into *Applications*. |
 | macOS (Intel) | `Cymatrox.Viewer_*_x64.dmg` | Same as above. |
 
+### Linux, in one command
+
+```bash
+curl -fsSL https://github.com/YaogoGerard/cymatrox-viewer/releases/latest/download/install.sh | sh
+```
+
+The script picks the right package for your distribution: on Debian and Ubuntu
+it installs the `.deb` with `apt` (it then asks for your password); on every
+other distribution it installs the AppImage in `~/.local/bin` and adds a menu
+entry and the icon, with no root needed. Run it with `--help` to install a
+specific version, choose another directory, or uninstall.
+
+Prefer to read it before running it? It is short:
+
+```bash
+curl -fsSL https://github.com/YaogoGerard/cymatrox-viewer/releases/latest/download/install.sh -o install.sh
+less install.sh
+sh install.sh
+```
+
 > **macOS:** the builds are unsigned, so Gatekeeper refuses the first launch. Right-click the app and choose **Open** to allow it (or clear the quarantine flag: `xattr -dr com.apple.quarantine /Applications/Cymatrox\ Viewer.app`).
 
 ## Documentation

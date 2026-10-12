@@ -48,5 +48,11 @@ jobs:
       - name: Test
         run: cargo test --all
 
+      - name: Check the installer script
+        if: runner.os == 'Linux'
+        run: |
+          sh -n scripts/install.sh
+          if command -v shellcheck >/dev/null 2>&1; then shellcheck scripts/install.sh; fi
+
       - name: Build
         run: cargo build
