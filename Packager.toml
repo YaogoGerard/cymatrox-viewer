@@ -7,7 +7,7 @@ identifier = "io.github.yaogogerard.cymatrox-viewer"
 description = "Interactive cymatics laboratory — visualize granular and fluid simulations"
 authors = ["Gerard"]
 homepage = "https://github.com/YaogoGerard/cymatrox-viewer"
-license-file = false
+license-file = "LICENSE"
 before-packaging-command = "cargo build --release"
 
 icons = [
