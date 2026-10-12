@@ -6,7 +6,7 @@ use super::widgets;
 use crate::{
     render::fluid3d,
     render::granular3d::PLATE_HALF_PX,
-    sim::{ACOUSTIC_AMPLITUDE_MPS, FLUID_AMPLITUDE_MPS2, GRANULAR_AMPLITUDE_M},
+    sim::{FLUID_AMPLITUDE_MPS2, GRANULAR_AMPLITUDE_M},
     ActiveModule, SimState, UiState,
 };
 use bevy::prelude::*;
@@ -68,7 +68,7 @@ pub fn ui_panel(
 
 /// Caption pinned just above the specimen in the current view. The granular
 /// module presents an aluminium plate; the fluid module presents a top-down
-/// cymascope pool. Both are called out beside the object itself, matching the
+/// cymascope pool. Each is called out beside the object itself, matching the
 /// mock-up's instrument labelling.
 fn draw_stage_caption(
     ctx: &egui::Context,
@@ -88,25 +88,23 @@ fn draw_stage_caption(
             viewport.center().y - PLATE_HALF_PX,
         ),
         ActiveModule::Fluid => {
-            // Mirror `fit_fluid_scope`: the pool radius is `PLATE_R/SCOPE_FIT_R`
-            // of the fitted scope radius, which occupies `SCOPE_FRACTION` of the
-            // shorter viewport edge (times the zoom). The scope is lifted by
-            // `SCOPE_LIFT_FRACTION` of its own radius, so the caption rides up
-            // with the instrument.
+            // Mirror `fit_fluid_scope`: the instrument's outer radius occupies
+            // `SCOPE_FRACTION` of the shorter viewport edge (times the zoom), and
+            // the scope is lifted by `SCOPE_LIFT_FRACTION` of that radius. Put the
+            // caption just above the *outer* bezel so it clears the ring, not
+            // hugging the (smaller) water pool.
             let vp_left = viewport.left() + panel_total;
             let vp_w = (viewport.right() - vp_left).max(1.0);
             let vp_h = viewport.height().max(1.0);
             let min_edge = vp_w.min(vp_h);
             let scope_r_px = fluid3d::SCOPE_FRACTION * 0.5 * min_edge * fluid_zoom.max(0.0);
-            let pool_r_px = (fluid3d::PLATE_R / fluid3d::SCOPE_FIT_R) * scope_r_px;
             let lift_px = fluid3d::SCOPE_LIFT_FRACTION * scope_r_px;
             (
                 "CYMASCOPE",
                 "fluid-scope-caption",
-                viewport.center().y - pool_r_px - lift_px,
+                viewport.center().y - scope_r_px - lift_px,
             )
         }
-        ActiveModule::Acoustic => return,
     };
 
     let center_x = (viewport.left() + panel_total + viewport.right()) * 0.5;
@@ -170,9 +168,8 @@ fn draw_frequency_ruler(
         x += 8.0;
     }
 
-    // The band depends on the module: audible for Granular/Fluid, ultrasonic
-    // for the levitation cell. Labels sit at the band's log thirds (which land
-    // exactly on 20/200/2k/20k and 5k/10k/20k/40k for the two bands).
+    // The band is audible for both remaining modules. Labels sit at the band's
+    // log thirds (which land exactly on 20/200/2k/20k).
     let (fmin, fmax) = crate::frequency_range(active_module);
     let span = (fmax / fmin).max(1.0);
     let frac = |f: f32| -> f32 { ((f.max(1e-3) / fmin).log10() / span.log10()).clamp(0.0, 1.0) };
@@ -268,13 +265,11 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
     let selected = match ui_state.active_module {
         ActiveModule::Granular => 0,
         ActiveModule::Fluid => 1,
-        ActiveModule::Acoustic => 2,
     };
-    if let Some(index) = widgets::segmented(ui, &["Granular", "Fluid", "Acoustic"], selected) {
+    if let Some(index) = widgets::segmented(ui, &["Granular", "Fluid"], selected) {
         let module = match index {
             0 => ActiveModule::Granular,
-            1 => ActiveModule::Fluid,
-            _ => ActiveModule::Acoustic,
+            _ => ActiveModule::Fluid,
         };
         if module != ui_state.active_module {
             ui_state.active_module = module;
@@ -361,8 +356,7 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
     widgets::divider(ui);
     ui.add_space(18.0);
 
-    // Physics (module specific). The acoustic module exposes no physical
-    // parameters in the design, so its single divider leads straight to voice.
+    // Physics (module specific).
     match ui_state.active_module {
         ActiveModule::Granular => {
             widgets::section_label(ui, "PHYSICS · GRANULAR");
@@ -418,7 +412,6 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
             widgets::divider(ui);
             ui.add_space(18.0);
         }
-        ActiveModule::Acoustic => {}
     }
 
     // Voice control
@@ -508,7 +501,6 @@ fn amplitude_unit(module: ActiveModule) -> String {
     match module {
         ActiveModule::Granular => format!("×{:.0} mm", GRANULAR_AMPLITUDE_M * 1000.0),
         ActiveModule::Fluid => format!("×{:.0} m/s²", FLUID_AMPLITUDE_MPS2),
-        ActiveModule::Acoustic => format!("×{:.3} m/s", ACOUSTIC_AMPLITUDE_MPS),
     }
 }
 
@@ -521,7 +513,6 @@ fn status(ui_state: &UiState, sim_state: &SimState) -> (&'static str, egui::Colo
         // The CymaScope figure is computed synchronously on the render side
         // (analytic glyph), so the Fluid module is ready as soon as it is shown.
         ActiveModule::Fluid => true,
-        ActiveModule::Acoustic => sim_state.acoustic_data.is_some(),
     };
     if streaming {
         ("STREAMING", ACCENT)

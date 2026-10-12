@@ -18,7 +18,6 @@ type ModuleCameraQuery<'w, 's> = Query<
         &'static mut PanOrbitCamera,
         &'static Camera,
         Option<&'static crate::render::fluid3d::FluidCamera>,
-        Option<&'static crate::render::acoustic3d::AcousticCamera>,
     ),
     With<ModuleViewportCamera>,
 >;
@@ -56,13 +55,12 @@ pub fn manual_module_controls(
     }
 
     let selected = match ui_state.active_module {
-        crate::ActiveModule::Fluid | crate::ActiveModule::Acoustic => ui_state.active_module,
+        crate::ActiveModule::Fluid => ui_state.active_module,
         crate::ActiveModule::Granular => return,
     };
-    for (mut camera, _viewport_camera, fluid, acoustic) in &mut cameras {
+    for (mut camera, _viewport_camera, fluid) in &mut cameras {
         let is_selected = match selected {
             crate::ActiveModule::Fluid => fluid.is_some(),
-            crate::ActiveModule::Acoustic => acoustic.is_some(),
             crate::ActiveModule::Granular => false,
         };
         if !is_selected {

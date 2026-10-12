@@ -3,7 +3,6 @@ use bevy::prelude::*;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub mod acoustic;
 pub mod fluid;
 pub mod granular;
 
@@ -20,12 +19,6 @@ pub mod granular;
 /// backlog cap below keeps a slow GPU from spiralling (it simply self-limits to
 /// whatever rate the device sustains).
 const GRANULAR_STEPS_PER_SEC: f64 = 240.0;
-/// The acoustic solver integrates one `dt = 1.5e-6 s` per `step()` (see
-/// `acoustic::default_config`), so 60 steps/s advances the levitation cell
-/// ~3.75x faster than the crate's reference pacing while keeping the readback
-/// rate low enough for the renderer to keep up on the UHD 630 iGPU (higher
-/// rates starve rendering — verified experimentally).
-const ACOUSTIC_STEPS_PER_SEC: f64 = 60.0;
 
 /// Largest backlog of simulation steps the accumulator may hold. Without this
 /// cap, a single GPU step slower than its budget would grow the backlog without
@@ -46,8 +39,6 @@ pub const GRANULAR_AMPLITUDE_M: f32 = 0.001;
 /// Acceleration amplitude (m/s²) the Fluid module's amplitude slider represents.
 /// The figure itself is the normalised analytic glyph, so this is a unit label.
 pub const FLUID_AMPLITUDE_MPS2: f32 = 40.0;
-/// Normalized UI amplitude converted to transducer normal velocity (m/s).
-pub const ACOUSTIC_AMPLITUDE_MPS: f32 = 0.002;
 
 /// Parameters sent from the UI thread to the sim thread.
 #[derive(Clone, Debug)]
@@ -78,10 +69,10 @@ impl SimParams {
             }
         };
         Self {
-            // Upper bound is the acoustic module's ultrasonic band (see
-            // `crate::frequency_range`); the audible modules clamp lower in the
-            // UI, so this only has to be a safety net against bad input.
-            frequency_hz: sanitize(self.frequency_hz, g.experiment.frequency_hz, 20.0, 40_000.0),
+            // Upper bound matches the audible band (see `crate::frequency_range`).
+            // The UI clamps lower, so this only has to be a safety net against
+            // bad input.
+            frequency_hz: sanitize(self.frequency_hz, g.experiment.frequency_hz, 20.0, 20_000.0),
             amplitude: sanitize(self.amplitude, 0.0, 0.0, 1.0),
             drag: sanitize(self.drag, g.solver.drag, 0.0, 20.0),
             restitution: sanitize(self.restitution, g.solver.restitution, 0.0, 1.0),
@@ -120,7 +111,6 @@ impl Default for SimParams {
 /// Data sent from the sim thread back to Bevy.
 pub enum SimData {
     Granular(Vec<cymatrox::granular::GranularData>),
-    Acoustic(Vec<cymatrox::acoustic::AcousticPressureNode>),
     Status(String),
 }
 
@@ -275,8 +265,6 @@ fn spawn_master(
                         None
                     }
                 };
-            let mut acoustic: Option<cymatrox::acoustic::AcousticSimulation> = None;
-
             let mut last_tick = Instant::now();
             let mut accumulator: f64 = 0.0;
             let mut last_param_change = Instant::now();
@@ -308,18 +296,6 @@ fn spawn_master(
                                 Err(e) => report(format!("Granular initialization failed: {e}")),
                             }
                         }
-                        Acoustic if acoustic.is_none() => {
-                            match cymatrox::acoustic::AcousticSimulation::new(
-                                &ctx,
-                                acoustic::default_config(),
-                            ) {
-                                Ok(s) => {
-                                    acoustic = Some(s);
-                                    info!("[sim] acoustic ready");
-                                }
-                                Err(e) => report(format!("Acoustic initialization failed: {e}")),
-                            }
-                        }
                         _ => {}
                     }
                     active = new_active;
@@ -333,14 +309,9 @@ fn spawn_master(
                     last_param_change = Instant::now();
 
                     let granular_amp = params.amplitude * GRANULAR_AMPLITUDE_M;
-                    let acoustic_amp = params.amplitude * ACOUSTIC_AMPLITUDE_MPS;
                     if let Some(s) = granular.as_mut() {
                         s.set_frequency(params.frequency_hz);
                         s.set_amplitude(granular_amp);
-                    }
-                    if let Some(s) = acoustic.as_mut() {
-                        s.set_frequency(params.frequency_hz);
-                        s.set_amplitude(acoustic_amp);
                     }
                 }
 
@@ -368,7 +339,7 @@ fn spawn_master(
 
                 let rebuild_due = match active {
                     Granular => (solver_differs && debounce_elapsed) || mode_reseed_due,
-                    Fluid | Acoustic => false,
+                    Fluid => false,
                 };
 
                 if rebuild_due {
@@ -401,7 +372,7 @@ fn spawn_master(
                                 }
                             }
                         }
-                        Fluid | Acoustic => {}
+                        Fluid => {}
                     }
                     // Avoid re-triggering until parameters change again.
                     last_param_change = now;
@@ -410,7 +381,6 @@ fn spawn_master(
                 // --- Frame-rate-independent pacing ----------------------------------
                 let steps_per_sec = match active {
                     Granular => GRANULAR_STEPS_PER_SEC,
-                    Acoustic => ACOUSTIC_STEPS_PER_SEC,
                     // No solver: the CymaScope figure is computed synchronously
                     // viewer-side, so there is nothing to pace.
                     Fluid => 0.0,
@@ -424,7 +394,6 @@ fn spawn_master(
                 }
                 let has_sim = match active {
                     Granular => granular.is_some(),
-                    Acoustic => acoustic.is_some(),
                     Fluid => false,
                 };
                 let mut steps = accumulator.floor() as usize;
@@ -457,19 +426,6 @@ fn spawn_master(
                     // No solver: the CymaScope figure is viewer-side and
                     // synchronous, so there is nothing to step.
                     Fluid => {}
-                    Acoustic => {
-                        if let Some(sim) = acoustic.as_mut() {
-                            for _ in 0..steps {
-                                match sim.step() {
-                                    Ok(frame) => latest = Some(SimData::Acoustic(frame)),
-                                    Err(e) => {
-                                        report(format!("Acoustic step failed: {e}"));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
 
                 if let Some(data) = latest {
@@ -525,7 +481,7 @@ mod tests {
             fluid_damping: 100.0,
         };
         let s = raw.sanitized();
-        assert_eq!(s.frequency_hz, 40_000.0);
+        assert_eq!(s.frequency_hz, 20_000.0);
         assert_eq!(s.amplitude, 1.0);
         assert_eq!(s.drag, 0.0);
         assert_eq!(s.restitution, 1.0);
