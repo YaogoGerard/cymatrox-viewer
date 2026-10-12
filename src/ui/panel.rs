@@ -247,7 +247,7 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
 
     // Title
     ui.label(
-        egui::RichText::new("CYMATROX")
+        egui::RichText::new("Cymatrox-viewer")
             .color(ACCENT)
             .size(22.0)
             .strong()
@@ -255,7 +255,7 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
     );
     ui.add_space(2.0);
     ui.label(
-        egui::RichText::new("Cymatics viewer")
+        egui::RichText::new("Cymatrox")
             .color(TEXT_DIM)
             .size(11.0),
     );
