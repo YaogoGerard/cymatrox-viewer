@@ -5,7 +5,7 @@ Interactive cymatics laboratory written in Rust. Visualizes two wave phenomena �
 ## Features
 
 - **Two simulation modes**: Granular (Chladni-like patterns), Fluid (Faraday waves on a circular dish).
-- **Real-time rendering**: a physically-lit 3D Chladni plate with sand grains and a top-down *cymascope* view of the fluid dish — orthographic, with a graduated instrument bezel and a Faraday mandala shaded as the reflection of a coaxial light ring (the way a real CymaScope photographs a cymaglyph). Every module runs behind a shared cinematic stack (HDR rendering, filmic Tony McMapface tonemapping and bloom).
+- **Real-time rendering**: a physically-lit 3D Chladni plate with sand grains and a top-down *cymascope* view of the fluid dish — orthographic, with a graduated instrument bezel and a Faraday mandala shaded as the reflection of a coaxial light ring (the way a real CymaScope photographs a cymaglyph). While a tone is held the surface keeps moving — travelling capillary ripples and a slow slosh — and a tone change grows the new figure in over about a second. Every module runs behind a shared cinematic stack (HDR rendering, filmic Tony McMapface tonemapping and bloom).
 - **Interactive control panel**: egui UI to tweak solver/liquid parameters, frequency and driving amplitude.
 - **Voice control**: optional microphone FFT input to drive the frequency (pitch).
 - **Frame-rate independent pacing**: simulation runs at fixed physics steps per second regardless of render FPS.
