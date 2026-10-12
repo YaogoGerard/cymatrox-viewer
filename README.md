@@ -1,6 +1,6 @@
 # Cymatrox Viewer
 
-Interactive cymatics laboratory written in Rust. Visualizes three wave phenomena powered by the GPU-accelerated [cymatrox](https://github.com/YaogoGerard/cymatrox) simulation crate and rendered in real-time with [Bevy](https://bevyengine.org/).
+Interactive cymatics laboratory written in Rust. Visualizes two wave phenomena — granular (Chladni patterns) and fluid (Faraday waves) — with the sand driven by the GPU-accelerated [cymatrox](https://github.com/YaogoGerard/cymatrox) simulation crate and both modules rendered in real-time with [Bevy](https://bevyengine.org/).
 
 ## Features
 
