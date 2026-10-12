@@ -254,11 +254,7 @@ fn contents(ui: &mut egui::Ui, ui_state: &mut UiState, sim_state: &SimState) -> 
             .extra_letter_spacing(3.0),
     );
     ui.add_space(2.0);
-    ui.label(
-        egui::RichText::new("Cymatrox")
-            .color(TEXT_DIM)
-            .size(11.0),
-    );
+    ui.label(egui::RichText::new("Cymatrox").color(TEXT_DIM).size(11.0));
     ui.add_space(18.0);
 
     // Module selector
