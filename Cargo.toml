@@ -28,3 +28,27 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+# Packaging configuration for cargo-packager.
+# https://docs.crabnebula.dev/packager/
+[package.metadata.packager]
+product-name = "Cymatrox Viewer"
+identifier = "io.github.yaogogerard.cymatrox-viewer"
+description = "Interactive cymatics laboratory — visualize granular and fluid simulations"
+authors = ["Gerard"]
+homepage = "https://github.com/YaogoGerard/cymatrox-viewer"
+license-file = "LICENSE"
+icons = ["build/icons/icon.png"]
+out-dir = "dist"
+
+[package.metadata.packager.deb]
+depends = ["libasound2", "libudev1"]
+section = "science"
+priority = "optional"
+
+[package.metadata.packager.nsis]
+install-mode = "currentUser"
+
+[package.metadata.packager.dmg]
+window-size = { width = 500, height = 400 }
+background = "build/icons/dmg-background.png"
