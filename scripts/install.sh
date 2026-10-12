@@ -63,12 +63,32 @@ Released under the MIT license. Project: $RELEASES
 EOF
 }
 
-# Print the contents of a URL (or fail).
+# Print the contents of a URL (or fail). Quiet: used for the small files.
 fetch() {
 	if command -v curl >/dev/null 2>&1; then
 		curl -fsSL --retry 3 "$1"
 	elif command -v wget >/dev/null 2>&1; then
 		wget -q --tries=3 -O - "$1"
+	else
+		die "curl or wget is required to download the package"
+	fi
+}
+
+# Download the package itself. The file is tens of megabytes, so show a progress
+# bar when a terminal is attached — and stay quiet when the output is piped.
+download_file() { # <url> <destination>
+	if command -v curl >/dev/null 2>&1; then
+		if [ -t 2 ]; then
+			curl -fL --retry 3 --progress-bar -o "$2" "$1"
+		else
+			curl -fsSL --retry 3 -o "$2" "$1"
+		fi
+	elif command -v wget >/dev/null 2>&1; then
+		if [ -t 2 ]; then
+			wget -O "$2" "$1"
+		else
+			wget -q -O "$2" "$1"
+		fi
 	else
 		die "curl or wget is required to download the package"
 	fi
@@ -251,6 +271,8 @@ main() {
 		exit 0
 	fi
 
+	printf '%s\n' "$PRODUCT installer"
+
 	TMP=$(mktemp -d "${TMPDIR:-/tmp}/cymatrox-viewer.XXXXXX")
 	trap 'rm -rf "$TMP"' EXIT INT TERM
 
@@ -264,7 +286,6 @@ main() {
 
 	choose_method
 
-	printf '%s\n' "$PRODUCT installer"
 	info "release : $VERSION"
 	info "method  : $METHOD"
 
@@ -273,7 +294,7 @@ main() {
 		name=${APP}_${NUM}_amd64.deb
 		file=$TMP/$name
 		info "downloading $name..."
-		fetch "$RELEASES/download/$VERSION/$name" >"$file" ||
+		download_file "$RELEASES/download/$VERSION/$name" "$file" ||
 			die "could not download $name for $VERSION"
 		install_deb "$file"
 		;;
@@ -281,7 +302,7 @@ main() {
 		name=${APP}_${NUM}_x86_64.AppImage
 		file=$TMP/$name
 		info "downloading $name..."
-		fetch "$RELEASES/download/$VERSION/$name" >"$file" ||
+		download_file "$RELEASES/download/$VERSION/$name" "$file" ||
 			die "could not download $name for $VERSION"
 		chmod +x "$file"
 		install_appimage "$file"
