@@ -59,6 +59,10 @@ Override default filters with the `RUST_LOG` environment variable (same syntax a
 RUST_LOG=warn,cymatrox_viewer=info cargo run --release
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for prerequisites, the check commands CI enforces, and the project layout.
+
 ## License
 
 MIT OR Apache-2.0
