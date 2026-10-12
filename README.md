@@ -12,7 +12,13 @@ Interactive cymatics laboratory written in Rust. Visualizes two wave phenomena �
 
 ## Screenshots
 
+**Granular module** — a live Chladni sand pattern on the illuminated plate, driven from the control panel on the left:
+
 ![The Granular module: the control panel on the left and a live Chladni sand pattern on the illuminated plate](docs/screenshots/granular.png)
+
+**Fluid module** — the top-down cymascope view of the circular dish, with its graduated instrument bezel and a Faraday mandala:
+
+![The Fluid module: the control panel on the left and a top-down cymascope view of the fluid dish with its graduated instrument bezel](docs/screenshots/fluid.png)
 
 ## Features
 
