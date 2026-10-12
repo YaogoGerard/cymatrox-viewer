@@ -28,6 +28,9 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 [profile.release]
 opt-level = 3
 lto = "thin"
+# Drop debug symbols from the shipped binaries: the release executable is
+# ~200 MB with them and a fraction of that without.
+strip = true
 
 # Embed the app icon (and version metadata) into the Windows executable.
 [target.'cfg(windows)'.build-dependencies]
