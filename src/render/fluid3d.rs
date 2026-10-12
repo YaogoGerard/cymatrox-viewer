@@ -1157,4 +1157,52 @@ mod tests {
         }
         assert_eq!(displayed_height_at(PLATE_R * 1.5, 0.0, &field, 1.0), 0.0);
     }
+
+    #[test]
+    fn surface_motion_is_alive_and_confined_to_the_pool() {
+        let a = MotionParams::new(0.0, 1.0);
+        let b = MotionParams::new(0.4, 1.0);
+        let probe = PLATE_R * 0.45;
+        let va = motion_at(probe, 0.0, &a);
+        let vb = motion_at(probe, 0.0, &b);
+        // The surface must actually change with time — that is the whole point.
+        let delta = (va.0 - vb.0).abs() + (va.1 - vb.1).abs() + (va.2 - vb.2).abs();
+        assert!(delta > 1e-6, "surface motion is frozen (delta {delta})");
+
+        for gy in 0..24 {
+            for gx in 0..24 {
+                let x = (gx as f32 / 23.0 * 2.0 - 1.0) * PLATE_R * 0.98;
+                let z = (gy as f32 / 23.0 * 2.0 - 1.0) * PLATE_R * 0.98;
+                let (h, dx, dz) = motion_at(x, z, &a);
+                assert!(h.is_finite() && dx.is_finite() && dz.is_finite());
+            }
+        }
+        // Zero outside the dish.
+        assert_eq!(motion_at(PLATE_R * 1.05, 0.0, &a), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn motion_slope_stays_a_fraction_of_the_figure_slope() {
+        let grad = estimate_motion_grad();
+        assert!(grad.is_finite() && grad > 0.0);
+        // Scaling the unit motion by `MOTION_SLOPE_FRACTION · TARGET_SLOPE / grad`
+        // must land the steepest motion slope near that fraction of the target.
+        let scale = MOTION_SLOPE_FRACTION * TARGET_SLOPE / grad;
+        let m = MotionParams::new(0.0, scale);
+        let mut peak = 0.0f32;
+        for gy in 0..64 {
+            for gx in 0..64 {
+                let x = (gx as f32 / 63.0 * 2.0 - 1.0) * PLATE_R * 0.99;
+                let z = (gy as f32 / 63.0 * 2.0 - 1.0) * PLATE_R * 0.99;
+                let (_, dx, dz) = motion_at(x, z, &m);
+                peak = peak.max((dx * dx + dz * dz).sqrt());
+            }
+        }
+        let target = MOTION_SLOPE_FRACTION * TARGET_SLOPE;
+        assert!(
+            peak <= target * 1.5,
+            "motion too strong: {peak} vs {target}"
+        );
+        assert!(peak >= target * 0.3, "motion too weak: {peak} vs {target}");
+    }
 }
