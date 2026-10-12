@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "cymatrox-viewer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bevy",
  "bevy_egui 0.42.0",
