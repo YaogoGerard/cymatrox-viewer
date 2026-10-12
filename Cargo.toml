@@ -40,6 +40,9 @@ homepage = "https://github.com/YaogoGerard/cymatrox-viewer"
 license-file = "LICENSE"
 icons = ["build/icons/icon.png", "build/icons/icon@2x.png"]
 out-dir = "dist"
+# Only ship the app itself: without this, cargo-packager packages every
+# bin target, which would bundle the `gpu_smoke` dev tool (~180 MB).
+binaries = [{ path = "cymatrox-viewer", main = true }]
 
 [package.metadata.packager.deb]
 depends = ["libasound2", "libudev1"]
