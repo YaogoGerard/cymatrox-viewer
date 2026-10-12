@@ -2,9 +2,9 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::ScalingMode;
 use bevy::input::mouse::MouseWheel;
-use bevy::log::debug;
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
+use std::sync::OnceLock;
 
 use crate::render::{glyph, ACCENT};
 use crate::{ActiveModule, UiState};
@@ -64,6 +64,27 @@ const TARGET_SLOPE: f32 = 1.05;
 /// Floor of the live slope reference (display units) used to autoscale the
 /// froth response. A calm pool stays dark instead of amplifying noise.
 const MIN_SLOPE_REF: f32 = 0.05;
+
+/// Fraction of the base figure's steepest slope carried by the continuous
+/// surface motion (travelling ripples + slosh). Large enough that the ring-light
+/// glints visibly travel across the pool, small enough that the Faraday figure
+/// stays clearly dominant.
+const MOTION_SLOPE_FRACTION: f32 = 0.33;
+/// Samples in the radial ripple lookup table (the ripple is a function of `r`).
+const RIP_TABLE_N: usize = 2048;
+/// Radial wavenumbers (rings across the pool), temporal frequencies (Hz) and
+/// relative weights of the outward-travelling ripples that keep the surface
+/// alive. Irrational-ish ratios avoid an obvious repeating beat.
+const RIP_WAVES: [f32; 3] = [4.0, 7.0, 11.0];
+const RIP_FREQS: [f32; 3] = [1.05, 1.55, 2.15];
+const RIP_WEIGHTS: [f32; 3] = [0.62, 0.28, 0.14];
+/// Slow slosh: a gentle tilt that precesses at this rate (Hz).
+const SLOSH_HZ: f32 = 0.22;
+const SLOSH_WEIGHT: f32 = 0.45;
+/// Settling spring, deliberately under-damped so a tone change rises, overshoots
+/// a hair and settles instead of swapping to a pre-drawn figure instantly.
+const FLUID_SPRING_K: f32 = 16.0;
+const FLUID_SPRING_DAMPING: f32 = 0.62;
 /// Prevent a numerically unstable frame from turning the water into a giant
 /// solid volume (~4 mm of water at the display scale). The physical values
 /// remain unchanged in the simulation.
@@ -96,6 +117,11 @@ const KEY_EULER: (f32, f32, f32) = (-1.02, 0.55, 0.0);
 /// a softer, wider glow (a fatter ring / rougher water).
 const RING_ELEV: f32 = 0.82;
 const RING_SIGMA: f32 = 0.17;
+/// Slope range and resolution of the glint lookup table. The highlight lobe is
+/// centred near slope 0.4 and is black well before 4, so the table is exact
+/// enough there; beyond it the highlight has faded out.
+const GLINT_SLOPE_MAX: f32 = 4.0;
+const GLINT_TABLE_N: usize = 1024;
 
 /// Zoom on the scope (mouse wheel). `1.0` is the fitted default framing; larger
 /// values move the camera closer. Lives in a resource because both the fit and
@@ -103,18 +129,138 @@ const RING_SIGMA: f32 = 0.17;
 #[derive(Resource)]
 pub struct FluidZoom(pub f32);
 
-/// Time-smoothed display state so the figure glides continuously when the tone
-/// changes instead of snapping between modes. `target` is the analytic glyph for
-/// the current `key` (quantised tone + liquid), recomputed only when it changes;
-/// `field` chases it each frame.
+/// One water vertex ready to be shaded: where it is, its precomputed rim
+/// highlight (`glass`) and its interpolated + animated display height and slope.
+struct WaterSample {
+    x: f32,
+    z: f32,
+    glass: f32,
+    h: f32,
+    dhx: f32,
+    dhz: f32,
+}
+
+/// Cached per-vertex geometry for one settled glyph: the display height and the
+/// two slope components at every disc vertex, in display units. Producing these
+/// needs the expensive rasterise + smooth + bilinear sampling, so they are
+/// computed once per tone and only interpolated (never re-sampled) thereafter.
+#[derive(Default)]
+struct GlyphCache {
+    h: Vec<f32>,
+    dhx: Vec<f32>,
+    dhz: Vec<f32>,
+    hscale: f32,
+    slope_ref: f32,
+    /// `hscale · max|field|`: the crest normalisation.
+    norm: f32,
+    valid: bool,
+}
+
+impl GlyphCache {
+    fn blank(n: usize) -> Self {
+        Self {
+            h: vec![0.0; n],
+            dhx: vec![0.0; n],
+            dhz: vec![0.0; n],
+            hscale: 1.0,
+            slope_ref: MIN_SLOPE_REF,
+            norm: 1.0,
+            valid: false,
+        }
+    }
+
+    /// Sample the freshly rasterised (and smoothed) glyph onto the disc vertices.
+    fn from_grid(grid: &[f32], xs: &[f32], zs: &[f32]) -> Self {
+        let smoothed = smooth_field(grid, GRID_OUT);
+        let max_abs = smoothed
+            .iter()
+            .fold(0.0f32, |a, &b| a.max(b.abs()))
+            .max(1e-12);
+        let dx_world = 2.0 * PLATE_R / (GRID_OUT as f32 - 1.0);
+        let gmax = max_slope(&smoothed, GRID_OUT).max(1e-12);
+        let hscale = (TARGET_SLOPE * dx_world / gmax).min(MAX_DISPLAY_HEIGHT / max_abs);
+        let slope_ref = (gmax * hscale / dx_world).max(MIN_SLOPE_REF);
+        let eps = PLATE_R / DISC_RINGS as f32;
+
+        let mut h = Vec::with_capacity(xs.len());
+        let mut dhx = Vec::with_capacity(xs.len());
+        let mut dhz = Vec::with_capacity(xs.len());
+        for (&x, &z) in xs.iter().zip(zs.iter()) {
+            h.push(displayed_height_at(x, z, &smoothed, hscale));
+            dhx.push(
+                (displayed_height_at(x + eps, z, &smoothed, hscale)
+                    - displayed_height_at(x - eps, z, &smoothed, hscale))
+                    / (2.0 * eps),
+            );
+            dhz.push(
+                (displayed_height_at(x, z + eps, &smoothed, hscale)
+                    - displayed_height_at(x, z - eps, &smoothed, hscale))
+                    / (2.0 * eps),
+            );
+        }
+        Self {
+            h,
+            dhx,
+            dhz,
+            hscale,
+            slope_ref,
+            norm: hscale * max_abs,
+            valid: true,
+        }
+    }
+
+    /// The interpolated cache `a + t·(b − a)`, i.e. the figure actually on the
+    /// water while a tone change is settling.
+    fn blend(a: &Self, b: &Self, t: f32) -> Self {
+        let mut h = Vec::with_capacity(a.h.len());
+        let mut dhx = Vec::with_capacity(a.h.len());
+        let mut dhz = Vec::with_capacity(a.h.len());
+        for i in 0..a.h.len() {
+            h.push(lerp(a.h[i], b.h[i], t));
+            dhx.push(lerp(a.dhx[i], b.dhx[i], t));
+            dhz.push(lerp(a.dhz[i], b.dhz[i], t));
+        }
+        Self {
+            h,
+            dhx,
+            dhz,
+            hscale: lerp(a.hscale, b.hscale, t),
+            slope_ref: lerp(a.slope_ref, b.slope_ref, t),
+            norm: lerp(a.norm, b.norm, t),
+            valid: a.valid || b.valid,
+        }
+    }
+}
+
+/// Everything the per-frame water update carries between frames. The costly
+/// per-tone work — rasterise a Faraday mode, smooth it, sample it onto the disc —
+/// happens only in [`GlyphCache::from_grid`]; each frame merely interpolates the
+/// two cached glyphs and adds a cheap analytic surface motion. That is what lets
+/// the pool move continuously at full frame rate instead of freezing on a
+/// pre-drawn figure.
 pub struct FluidDisplayState {
-    field: Vec<f32>,
-    target: Vec<f32>,
+    cur: GlyphCache,
+    prev: GlyphCache,
     key: [u32; 4],
-    /// Set once the smoothed field has settled onto the current glyph: the mesh
-    /// then stops being rebuilt every frame (the pool is static until the tone
-    /// changes), which keeps the fine tessellation free at rest.
-    converged: bool,
+    /// Hand-off from `prev` to `cur`: 0 at the old figure, 1 at the new, with a
+    /// small overshoot from the under-damped spring.
+    progress: f32,
+    velocity: f32,
+    /// Wall-clock time of the previous update (seconds), for the spring `dt`.
+    last_time: f32,
+    /// Disc vertex positions in mesh order. The vertices never move and the
+    /// angles are too costly to recompute every frame.
+    xs: Vec<f32>,
+    zs: Vec<f32>,
+    /// Unit vectors of the `DISC_SEGMENTS` angular steps, shared by every ring so
+    /// no trigonometry runs in the per-vertex loop.
+    cosj: Vec<f32>,
+    sinj: Vec<f32>,
+    /// Scratch grid the analytic glyph is rasterised into before smoothing.
+    grid: Vec<f32>,
+    /// Largest world-space gradient of the *unit* surface motion; used to scale
+    /// the motion to a fixed fraction of the figure's slope.
+    motion_grad: f32,
 }
 
 pub fn setup_fluid_scene(
@@ -434,10 +580,10 @@ fn glyph_key(ui: &UiState) -> [u32; 4] {
 
 pub fn update_fluid_mesh(
     ui_state: Res<UiState>,
+    time: Res<Time>,
     query: Query<&Mesh3d, With<FluidHeightmap>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut state: Local<Option<FluidDisplayState>>,
-    mut last_log: Local<Option<std::time::Instant>>,
 ) {
     // Only rebuild the visible module.
     if ui_state.active_module != ActiveModule::Fluid {
@@ -451,20 +597,67 @@ pub fn update_fluid_mesh(
         return;
     };
 
-    let st = state.get_or_insert_with(|| FluidDisplayState {
-        field: vec![0.0; GRID_OUT * GRID_OUT],
-        target: vec![0.0; GRID_OUT * GRID_OUT],
-        key: [u32::MAX; 4],
-        converged: false,
+    let n_vert = 1 + DISC_RINGS * DISC_SEGMENTS;
+    let st = state.get_or_insert_with(|| {
+        let mut cosj = Vec::with_capacity(DISC_SEGMENTS);
+        let mut sinj = Vec::with_capacity(DISC_SEGMENTS);
+        for j in 0..DISC_SEGMENTS {
+            let th = std::f32::consts::TAU * j as f32 / DISC_SEGMENTS as f32;
+            cosj.push(th.cos());
+            sinj.push(th.sin());
+        }
+        let mut xs = Vec::with_capacity(n_vert);
+        let mut zs = Vec::with_capacity(n_vert);
+        xs.push(0.0);
+        zs.push(0.0);
+        for i in 1..=DISC_RINGS {
+            let r = PLATE_R * i as f32 / DISC_RINGS as f32;
+            for j in 0..DISC_SEGMENTS {
+                xs.push(r * cosj[j]);
+                zs.push(r * sinj[j]);
+            }
+        }
+        FluidDisplayState {
+            cur: GlyphCache::blank(n_vert),
+            prev: GlyphCache::blank(n_vert),
+            key: [u32::MAX; 4],
+            progress: 0.0,
+            velocity: 0.0,
+            last_time: 0.0,
+            xs,
+            zs,
+            cosj,
+            sinj,
+            grid: vec![0.0; GRID_OUT * GRID_OUT],
+            motion_grad: estimate_motion_grad(),
+        }
     });
+
+    // Frame time for the settling spring, capped so a stalled frame cannot blow
+    // up the integration.
+    let now = time.elapsed_secs();
+    let dt = if st.last_time == 0.0 {
+        1.0 / 60.0
+    } else {
+        (now - st.last_time).clamp(0.0, 0.05)
+    };
+    st.last_time = now;
 
     // The placed figure is the analytic Faraday glyph for the current tone,
     // regenerated only when the tone or the liquid changes. The physics
     // (Bessel modes + capillary–gravity dispersion) lives in this viewer's
     // `render::glyph` module; the crate's fluid solver is a separate,
     // general-purpose simulation.
-    let key = glyph_key(&ui_state);
-    if st.key != key {
+    if st.key != glyph_key(&ui_state) {
+        st.key = glyph_key(&ui_state);
+
+        // The figure currently on the water becomes the outgoing one, so the
+        // spring below morphs it into the new mode instead of cutting to it.
+        if st.cur.valid {
+            st.prev = GlyphCache::blend(&st.prev, &st.cur, st.progress);
+            st.prev.valid = true;
+        }
+
         let liquid = cymatrox::fluid::LiquidSpec {
             density: ui_state.fluid_density,
             surface_tension: ui_state.fluid_surface_tension,
@@ -472,99 +665,287 @@ pub fn update_fluid_mesh(
             damping: ui_state.fluid_damping,
             gravity: 9.81,
         };
-        glyph::rasterise_glyph(
-            ui_state.frequency_hz,
-            PLATE_RADIUS_M,
-            &liquid,
-            &mut st.target,
-        );
-        st.key = key;
-        st.converged = false;
-    }
-    if st.converged {
-        return;
+        glyph::rasterise_glyph(ui_state.frequency_hz, PLATE_RADIUS_M, &liquid, &mut st.grid);
+        st.cur = GlyphCache::from_grid(&st.grid, &st.xs, &st.zs);
+
+        // First figure ever: keep the normalisation identical so only the relief
+        // grows out of the calm pool instead of the whole tone jumping.
+        if !st.prev.valid {
+            st.prev.hscale = st.cur.hscale;
+            st.prev.slope_ref = st.cur.slope_ref;
+            st.prev.norm = st.cur.norm;
+            st.prev.valid = true;
+        }
+
+        st.progress = 0.0;
+        st.velocity = 0.0;
     }
 
+    // Under-damped spring on the hand-off progress: the new figure rises,
+    // overshoots a hair and settles — the water *responds* to the tone rather
+    // than presenting a pre-drawn figure.
+    let stiffness = FLUID_SPRING_K;
+    let damping = 2.0 * FLUID_SPRING_DAMPING * stiffness.sqrt();
+    let accel = stiffness * (1.0 - st.progress) - damping * st.velocity;
+    st.velocity += accel * dt;
+    st.progress += st.velocity * dt;
+    let p = st.progress;
+
+    let slope_ref = lerp(st.prev.slope_ref, st.cur.slope_ref, p);
+    let norm = lerp(st.prev.norm, st.cur.norm, p).max(1e-6);
+    let motion_scale = MOTION_SLOPE_FRACTION * slope_ref / st.motion_grad.max(1e-6);
+
+    // Rebuild the disc: interpolate the two cached glyphs, add the live surface
+    // motion and shade. No bilinear sampling happens here, so this stays cheap
+    // enough to run every frame. The radial part of the motion is constant around
+    // each ring, so it is evaluated once per ring and reused for every segment.
+    let motion = MotionParams::new(now, motion_scale);
+    let inv_plate = 1.0 / PLATE_R;
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n_vert);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(n_vert);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(n_vert);
+
+    // Hub vertex (r = 0).
     {
-        let now = std::time::Instant::now();
-        let do_log = last_log
-            .as_ref()
-            .map(|t| now.duration_since(*t) >= std::time::Duration::from_secs(1))
-            .unwrap_or(true);
-        if do_log {
-            let max_h = st.target.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
-            debug!(
-                "[fluid3d] update: {} nodes, max |h|={:.3e} m",
-                st.target.len(),
-                max_h
-            );
-            *last_log = Some(now);
-        }
+        let (mh, mdx, mdz) = motion_at(0.0, 0.0, &motion);
+        let h = lerp(st.prev.h[0], st.cur.h[0], p) + mh;
+        let dhx = lerp(st.prev.dhx[0], st.cur.dhx[0], p) + mdx;
+        let dhz = lerp(st.prev.dhz[0], st.cur.dhz[0], p) + mdz;
+        let (pos, nrm, col) = shade_surface(
+            WaterSample {
+                x: 0.0,
+                z: 0.0,
+                glass: 0.0,
+                h,
+                dhx,
+                dhz,
+            },
+            slope_ref,
+            norm,
+        );
+        positions.push(pos);
+        normals.push(nrm);
+        colors.push(col);
     }
-
-    // Time-smooth the display field toward the glyph, so a tone change
-    // cross-fades the previous figure into the new one.
-    let mut max_delta = 0.0f32;
-    for (smoothed, goal) in st.field.iter_mut().zip(st.target.iter()) {
-        let d = *goal - *smoothed;
-        *smoothed += 0.8 * d;
-        max_delta = max_delta.max(d.abs());
-    }
-    let hlin: Vec<f32> = st.field.clone();
-
-    // Spatial smoothing: a light 3x3 convolution takes the hard sampling edge
-    // off the high-order modes without erasing the fine nodal network.
-    let hlin = smooth_field(&hlin, GRID_OUT);
-
-    // Normalise the displayed relief by its *steepest slope*, not its tallest
-    // peak. The glyph is a physical height field in metres (tens of
-    // micrometres), far too small to shade at the dish scale, so it is
-    // exaggerated — but a constant aspect ratio is what keeps a coarse tone
-    // (a few big waves) and a fine tone (a shimmer of rings) both reading as
-    // water. `MAX_DISPLAY_HEIGHT` still caps a near-singular frame.
-    let max_abs = hlin.iter().fold(0.0f32, |a, &b| a.max(b.abs())).max(1e-12);
-    let dx_world = 2.0 * PLATE_R / (GRID_OUT as f32 - 1.0);
-    let gmax = max_slope(&hlin, GRID_OUT).max(1e-12);
-    let hscale = (TARGET_SLOPE * dx_world / gmax).min(MAX_DISPLAY_HEIGHT / max_abs);
-
-    // Autoscale the froth response to this frame's live slope so a developing
-    // glyph reads immediately and a calm pool stays clean.
-    let slope_ref = (gmax * hscale / dx_world).max(MIN_SLOPE_REF);
-
-    // Rebuild the polar disc, sampling the field at each vertex and shading the
-    // relief via surface normals.
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(1 + DISC_RINGS * DISC_SEGMENTS);
-    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(1 + DISC_RINGS * DISC_SEGMENTS);
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(1 + DISC_RINGS * DISC_SEGMENTS);
-
-    let mut push = |x: f32, z: f32| {
-        let (p, n, c) = water_vertex(x, z, &hlin, slope_ref, hscale, max_abs);
-        positions.push(p);
-        normals.push(n);
-        colors.push(c);
-    };
-    push(0.0, 0.0);
+    let mut k = 1;
     for i in 1..=DISC_RINGS {
-        let r = PLATE_R * i as f32 / DISC_RINGS as f32;
+        let rn = i as f32 / DISC_RINGS as f32;
+        let r2 = rn * rn;
+        let env = 1.0 - r2;
+        let (ripple, d_ripple) = ripple_radial(rn, &motion);
+        // Radial derivative of the motion field with the slosh split out, so the
+        // per-segment cost is a handful of multiplies.
+        let a_ring = env * d_ripple - 2.0 * rn * ripple;
+        let b_ring = -2.0 * rn;
+        let du_coef = env * motion.slosh_cos * SLOSH_WEIGHT;
+        let dv_coef = env * motion.slosh_sin * SLOSH_WEIGHT;
+        let glass = smoothstep(0.90, 1.0, rn);
+
         for j in 0..DISC_SEGMENTS {
-            let th = std::f32::consts::TAU * j as f32 / DISC_SEGMENTS as f32;
-            push(r * th.cos(), r * th.sin());
+            let cj = st.cosj[j];
+            let sj = st.sinj[j];
+            let u = rn * cj;
+            let v = rn * sj;
+            let slosh = (u * motion.slosh_cos + v * motion.slosh_sin) * SLOSH_WEIGHT;
+            let surface = ripple + slosh;
+            let d_dr = a_ring + b_ring * slosh;
+
+            let mh = motion.scale * env * surface;
+            let mdx = motion.scale * inv_plate * (d_dr * cj + du_coef);
+            let mdz = motion.scale * inv_plate * (d_dr * sj + dv_coef);
+
+            let h = lerp(st.prev.h[k], st.cur.h[k], p) + mh;
+            let dhx = lerp(st.prev.dhx[k], st.cur.dhx[k], p) + mdx;
+            let dhz = lerp(st.prev.dhz[k], st.cur.dhz[k], p) + mdz;
+            let (pos, nrm, col) = shade_surface(
+                WaterSample {
+                    x: u * PLATE_R,
+                    z: v * PLATE_R,
+                    glass,
+                    h,
+                    dhx,
+                    dhz,
+                },
+                slope_ref,
+                norm,
+            );
+            positions.push(pos);
+            normals.push(nrm);
+            colors.push(col);
+            k += 1;
         }
     }
-
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+}
 
-    // Once the smoothed field has essentially arrived at the glyph, freeze:
-    // nothing animates until the tone (or the liquid) changes.
-    if max_delta <= 1e-4 * max_abs {
-        st.converged = true;
+/// Radial ripple lookup: `[sin, cos][component][i]` for `r_i = i / (N − 1)`.
+///
+/// The travelling ripples are functions of radius, so tabulating their spatial
+/// part turns the per-cell cost from three `sin` calls into three interpolated
+/// lookups; only the small temporal part is recomputed each frame.
+fn ripple_table() -> &'static [[[f32; RIP_TABLE_N]; 3]; 2] {
+    static TABLE: OnceLock<[[[f32; RIP_TABLE_N]; 3]; 2]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut sin_t = [[0.0f32; RIP_TABLE_N]; 3];
+        let mut cos_t = [[0.0f32; RIP_TABLE_N]; 3];
+        for comp in 0..3 {
+            for (i, (s, c)) in sin_t[comp]
+                .iter_mut()
+                .zip(cos_t[comp].iter_mut())
+                .enumerate()
+            {
+                let r = i as f32 / (RIP_TABLE_N - 1) as f32;
+                let a = std::f32::consts::TAU * RIP_WAVES[comp] * r;
+                *s = a.sin();
+                *c = a.cos();
+            }
+        }
+        [sin_t, cos_t]
+    })
+}
+
+/// Precomputed temporal factors of the surface motion for one frame. The
+/// travelling ripples and the slosh depend on time only through these, so they
+/// are evaluated once per frame rather than once per vertex.
+struct MotionParams {
+    /// `(sin, cos)` of `TAU · frequency · t` for each ripple component.
+    temporal: [(f32, f32); 3],
+    slosh_sin: f32,
+    slosh_cos: f32,
+    /// Display-unit amplitude that scales the unit motion to the wanted slope.
+    scale: f32,
+}
+
+impl MotionParams {
+    fn new(t: f32, scale: f32) -> Self {
+        let temporal =
+            std::array::from_fn(|c| (std::f32::consts::TAU * RIP_FREQS[c] * t).sin_cos());
+        let (slosh_sin, slosh_cos) = (std::f32::consts::TAU * SLOSH_HZ * t).sin_cos();
+        Self {
+            temporal,
+            slosh_sin,
+            slosh_cos,
+            scale,
+        }
     }
 }
 
-/// Samples the display field at a plate position and returns the displaced
-/// position, the surface normal (from field gradients) and the surface colour.
+/// Glint strength vs. surface slope, tabulated once. Evaluating the coaxial
+/// highlight directly needs `acos` + `exp` per vertex; the curve is smooth and
+/// monotone in slope, so a small lerped table is indistinguishable.
+fn glint_table() -> &'static [f32; GLINT_TABLE_N] {
+    static TABLE: OnceLock<[f32; GLINT_TABLE_N]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        std::array::from_fn(|i| {
+            let slope = i as f32 / (GLINT_TABLE_N - 1) as f32 * GLINT_SLOPE_MAX;
+            // Tilt of the surface normal from vertical is `atan(slope)`.
+            let reflected_elev = std::f32::consts::FRAC_PI_2 - 2.0 * slope.atan();
+            let d = reflected_elev - RING_ELEV;
+            (-(d * d) / (RING_SIGMA * RING_SIGMA)).exp()
+        })
+    })
+}
+
+fn glint_at(slope: f32) -> f32 {
+    let t = (slope / GLINT_SLOPE_MAX).clamp(0.0, 1.0) * (GLINT_TABLE_N - 1) as f32;
+    let i0 = t as usize;
+    let i1 = (i0 + 1).min(GLINT_TABLE_N - 1);
+    let f = t - i0 as f32;
+    let tab = glint_table();
+    tab[i0] * (1.0 - f) + tab[i1] * f
+}
+
+/// Radial profile of the travelling ripples at normalised radius `r`, as the
+/// value and its radial derivative. Depends only on `r`, so the per-vertex loop
+/// evaluates it once per mesh ring rather than once per vertex.
+fn ripple_radial(r: f32, m: &MotionParams) -> (f32, f32) {
+    use std::f32::consts::TAU;
+    let table = ripple_table();
+    let (sin_t, cos_t) = (&table[0], &table[1]);
+    let rt = r * (RIP_TABLE_N - 1) as f32;
+    let i0 = rt as usize;
+    let i1 = (i0 + 1).min(RIP_TABLE_N - 1);
+    let f = rt - i0 as f32;
+
+    let mut ripple = 0.0f32;
+    let mut d_ripple = 0.0f32;
+    for comp in 0..3 {
+        let sa = sin_t[comp][i0] * (1.0 - f) + sin_t[comp][i1] * f;
+        let ca = cos_t[comp][i0] * (1.0 - f) + cos_t[comp][i1] * f;
+        let (ts, tc) = m.temporal[comp];
+        // sin(TAU·n·r − TAU·f·t) = sin(a)cos(t) − cos(a)sin(t).
+        ripple += RIP_WEIGHTS[comp] * (sa * tc - ca * ts);
+        // d/dr of the same term: TAU·n·[cos(a)cos(t) + sin(a)sin(t)].
+        d_ripple += RIP_WEIGHTS[comp] * TAU * RIP_WAVES[comp] * (ca * tc + sa * ts);
+    }
+    (ripple, d_ripple)
+}
+
+/// Surface motion at a plate position: a few outward-travelling capillary ripples
+/// plus a slow slosh, returned as the height and its two world-space gradients,
+/// already scaled to display units. Zero outside the disc and faded to zero at
+/// the contact line.
+///
+/// This is a pure *shape* modulation. A global vertical oscillation — the literal
+/// Faraday standing wave — would be rescaled away by the per-frame slope
+/// normalisation (scaling every height scales every slope equally), which is why
+/// a naively "waved" pool still reads as frozen. Moving the *nodal network* is
+/// what actually animates the picture.
+fn motion_at(x: f32, z: f32, m: &MotionParams) -> (f32, f32, f32) {
+    let u = x / PLATE_R;
+    let v = z / PLATE_R;
+    let r2 = u * u + v * v;
+    if r2 >= 1.0 || m.scale == 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let r = r2.sqrt();
+    let env = 1.0 - r2;
+
+    let (ripple, d_ripple) = ripple_radial(r, m);
+
+    let slosh = (u * m.slosh_cos + v * m.slosh_sin) * SLOSH_WEIGHT;
+    let d_slosh_du = m.slosh_cos * SLOSH_WEIGHT;
+    let d_slosh_dv = m.slosh_sin * SLOSH_WEIGHT;
+
+    // `env` multiplies `surface`; differentiate radially, then split into u/v.
+    let surface = ripple + slosh;
+    let d_dr = -2.0 * r * surface + env * d_ripple;
+    let (u_r, v_r) = if r > 1e-6 { (u / r, v / r) } else { (0.0, 0.0) };
+    let dm_du = d_dr * u_r + env * d_slosh_du;
+    let dm_dv = d_dr * v_r + env * d_slosh_dv;
+
+    let inv_r = 1.0 / PLATE_R;
+    (
+        m.scale * env * surface,
+        m.scale * inv_r * dm_du,
+        m.scale * inv_r * dm_dv,
+    )
+}
+
+/// Largest world-space gradient of the *unit* surface motion, sampled over a few
+/// times and a dense disc. Used once to scale the motion to a fixed fraction of
+/// the figure's slope at any tone.
+fn estimate_motion_grad() -> f32 {
+    let mut best = 1e-6f32;
+    for ti in 0..8 {
+        let m = MotionParams::new(ti as f32 * 0.37, 1.0);
+        for gy in 0..128 {
+            let z = (gy as f32 / 127.0 * 2.0 - 1.0) * PLATE_R;
+            for gx in 0..128 {
+                let x = (gx as f32 / 127.0 * 2.0 - 1.0) * PLATE_R;
+                let (_, dx, dz) = motion_at(x, z, &m);
+                best = best.max((dx * dx + dz * dz).sqrt());
+            }
+        }
+    }
+    best
+}
+
+/// Shades one water vertex from its (already interpolated + animated) display
+/// height and slope, returning the displaced position, the surface normal and
+/// the colour. `glass` is the precomputed rim highlight for the vertex's ring.
 ///
 /// The water is drawn **unlit**, so the whole CymaGlyph is baked here, following
 /// how the instrument actually captures one: an ultra-pure water surface viewed
@@ -574,22 +955,15 @@ pub fn update_fluid_mesh(
 /// contour of the wave slope — which is what draws the bright nodal lines and
 /// petals over an otherwise dark pool. Froth whitens the steepest crests and a
 /// brighter meniscus marks the film climbing the dish wall.
-fn water_vertex(
-    x: f32,
-    z: f32,
-    field: &[f32],
-    slope_ref: f32,
-    hscale: f32,
-    ref_abs: f32,
-) -> ([f32; 3], [f32; 3], [f32; 4]) {
-    let h = displayed_height_at(x, z, field, hscale);
-    let eps = PLATE_R / DISC_RINGS as f32;
-    let dhx = (displayed_height_at(x + eps, z, field, hscale)
-        - displayed_height_at(x - eps, z, field, hscale))
-        / (2.0 * eps);
-    let dhz = (displayed_height_at(x, z + eps, field, hscale)
-        - displayed_height_at(x, z - eps, field, hscale))
-        / (2.0 * eps);
+fn shade_surface(v: WaterSample, slope_ref: f32, norm: f32) -> ([f32; 3], [f32; 3], [f32; 4]) {
+    let WaterSample {
+        x,
+        z,
+        glass,
+        h,
+        dhx,
+        dhz,
+    } = v;
     let n = Vec3::new(-dhx, 1.0, -dhz).normalize();
 
     // Froth: the steepest crests whiten slightly (real standing waves tear a
@@ -597,22 +971,18 @@ fn water_vertex(
     let slope = (dhx * dhx + dhz * dhz).sqrt();
     let s = (slope / slope_ref).clamp(0.0, 1.0);
     let foam = smoothstep(0.72, 1.0, s);
-    // The meniscus where the water climbs the wall catches the light.
-    let glass = smoothstep(0.90, 1.0, (x * x + z * z).sqrt() / PLATE_R);
 
     // Coaxial light-ring reflection. A flat patch sends the view ray straight
     // back up (reflected elevation 90°); tilting the surface by θ lowers it to
     // 90° − 2θ. So the ring at `RING_ELEV` is caught where the wave slope
     // reaches (90° − RING_ELEV)/2, and the highlight follows that slope contour.
-    let theta = n.y.clamp(-1.0, 1.0).acos();
-    let reflected_elev = std::f32::consts::FRAC_PI_2 - 2.0 * theta;
-    let d = reflected_elev - RING_ELEV;
-    let glint = (-(d * d) / (RING_SIGMA * RING_SIGMA)).exp();
+    // Tabulated over the slope so the hot loop avoids `acos` + `exp` per vertex.
+    let glint = glint_at(slope);
 
     // The illuminated water: a dark body that still carries a faint image of the
     // wave (so the whole figure reads, not only where it catches the ring), with
     // the ring reflection added on top as the bright, near-white cymascope lines.
-    let crest = (h / (hscale * ref_abs).max(1e-12)).clamp(-1.0, 1.0) * 0.5 + 0.5;
+    let crest = (h / norm.max(1e-12)).clamp(-1.0, 1.0) * 0.5 + 0.5;
     let deep = Vec3::new(0.10, 0.17, 0.24) * (0.18 + 0.82 * crest);
     let col = deep
         + Vec3::new(0.95, 1.00, 1.08) * glint
@@ -645,6 +1015,12 @@ fn max_slope(field: &[f32], w: usize) -> f32 {
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// Linear interpolation; `t` may exceed `[0, 1]` (the settling spring overshoots
+/// slightly), which deliberately extrapolates.
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
 }
 
 /// Displaced surface height at a plate position: the normalised field scaled to
