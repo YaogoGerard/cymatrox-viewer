@@ -4,7 +4,7 @@
 
 # Cymatrox Viewer
 
-[![CI](https://github.com/YaogoGerard/cymatrox-viewer/actions/workflows/ci.yml/badge.svg)](https://github.com/YaogoGerard/cymatrox-viewer/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/YaogoGerard/cymatrox-viewer#license) [![Rust](https://img.shields.io/badge/rust-stable-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/) [![Bevy](https://img.shields.io/badge/Bevy-0.19-blueviolet)](https://bevyengine.org/) [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)](https://github.com/YaogoGerard/cymatrox-viewer#packaging--releases)
+[![CI](https://github.com/YaogoGerard/cymatrox-viewer/actions/workflows/ci.yml/badge.svg)](https://github.com/YaogoGerard/cymatrox-viewer/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/YaogoGerard/cymatrox-viewer#license) [![Rust](https://img.shields.io/badge/rust-stable-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/) [![Bevy](https://img.shields.io/badge/Bevy-0.19-blueviolet)](https://bevyengine.org/) [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)](https://github.com/YaogoGerard/cymatrox-viewer#installation)
 
 </div>
 
@@ -30,52 +30,19 @@ Interactive cymatics laboratory written in Rust. Visualizes two wave phenomena �
 - **Production-ready packaging**: deb/AppImage (Linux), NSIS installer (Windows), DMG (macOS, unsigned).
 - **Traced logging**: configurable with `RUST_LOG` (e.g. `RUST_LOG=info,cymatrox_viewer=debug`).
 
-## Building
+## Installation
 
-```bash
-# Debug build
-cargo build
+Download the file for your platform from the [latest release](https://github.com/YaogoGerard/cymatrox-viewer/releases/latest):
 
-# Release build
-cargo build --release
+| Platform | File | How to install |
+| --- | --- | --- |
+| Windows (x64) | `cymatrox-viewer_*_x64-setup.exe` | Run the installer. It installs for the current user only — no administrator rights needed. |
+| Linux (Debian/Ubuntu) | `cymatrox-viewer_*_amd64.deb` | `sudo apt install ./cymatrox-viewer_*_amd64.deb` |
+| Linux (any distribution) | `cymatrox-viewer_*_x86_64.AppImage` | `chmod +x cymatrox-viewer_*_x86_64.AppImage && ./cymatrox-viewer_*_x86_64.AppImage` |
+| macOS (Apple Silicon) | `Cymatrox.Viewer_*_aarch64.dmg` | Open the DMG and drag **Cymatrox Viewer** into *Applications*. |
+| macOS (Intel) | `Cymatrox.Viewer_*_x64.dmg` | Same as above. |
 
-# Run
-cargo run --release
-```
-
-## GPU dual-context smoke test
-
-Validates that cymatrox and Bevy can both initialize their own wgpu devices in the same process (step 4b from the plan).
-
-```bash
-cargo run --bin gpu_smoke
-```
-
-## Tests
-
-```bash
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
-cargo fmt --all -- --check
-```
-
-## Packaging & Releases
-
-Packaging is configured through the `[package.metadata.packager]` table in [`Cargo.toml`](./Cargo.toml) and [`cargo-packager`](https://github.com/crabnebula-dev/cargo-packager). On tagged releases (`v*.*.*`), the GitHub Actions workflow builds each target with `cargo build --release --target …` and writes the installers to `dist/`: **deb + AppImage** (Linux), **NSIS** (Windows), and **DMG** (macOS x86_64 + aarch64, unsigned).
-
-Auto-update is not wired up yet: producing `cargo-packager-updater` artifacts needs a signing key (`CARGO_PACKAGER_SIGN_PRIVATE_KEY`) and updater metadata, which are not configured.
-
-## macOS note
-
-The DMG builds are **unsigned**. On first launch, right-click the app and choose "Open" to bypass Gatekeeper.
-
-## Logging
-
-Override default filters with the `RUST_LOG` environment variable (same syntax as `env_logger`/`tracing_subscriber`).
-
-```bash
-RUST_LOG=warn,cymatrox_viewer=info cargo run --release
-```
+> **macOS:** the builds are unsigned, so Gatekeeper refuses the first launch. Right-click the app and choose **Open** to allow it (or clear the quarantine flag: `xattr -dr com.apple.quarantine /Applications/Cymatrox\ Viewer.app`).
 
 ## Documentation
 
