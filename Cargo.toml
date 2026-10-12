@@ -47,7 +47,7 @@ section = "science"
 priority = "optional"
 
 [package.metadata.packager.nsis]
-install-mode = "currentUser"
+installMode = "currentUser"
 
 [package.metadata.packager.dmg]
 window-size = { width = 500, height = 400 }
