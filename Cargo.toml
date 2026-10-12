@@ -38,7 +38,7 @@ description = "Interactive cymatics laboratory — visualize granular and fluid 
 authors = ["Gerard"]
 homepage = "https://github.com/YaogoGerard/cymatrox-viewer"
 license-file = "LICENSE"
-icons = ["build/icons/icon.png"]
+icons = ["build/icons/icon.png", "build/icons/icon@2x.png"]
 out-dir = "dist"
 
 [package.metadata.packager.deb]
