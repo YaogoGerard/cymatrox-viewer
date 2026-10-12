@@ -360,4 +360,16 @@ mod tests {
         let p300 = responsive_panel_width(300.0);
         assert!((p300 - 292.0).abs() < 1e-4);
     }
+
+    #[test]
+    fn every_module_band_is_audible_and_ordered() {
+        for module in [ActiveModule::Granular, ActiveModule::Fluid] {
+            let (lo, hi) = frequency_range(module);
+            assert!(lo < hi, "{module:?} band is empty");
+            assert!(
+                lo >= 20.0 && hi <= 20_000.0,
+                "{module:?} band leaves hearing"
+            );
+        }
+    }
 }
