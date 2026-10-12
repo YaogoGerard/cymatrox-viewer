@@ -1,3 +1,7 @@
+// Keep the console window out of the way on Windows release builds: this is a
+// GUI application. Debug builds keep the console so logs stay visible.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod ui;
 use bevy::camera::{visibility::RenderLayers, CameraOutputMode};
 use bevy::log::{debug, error, info};
