@@ -1,6 +1,10 @@
 # Cymatrox Viewer
 
+<div align="center">
+
 [![CI](https://github.com/YaogoGerard/cymatrox-viewer/actions/workflows/ci.yml/badge.svg)](https://github.com/YaogoGerard/cymatrox-viewer/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/YaogoGerard/cymatrox-viewer#license) [![Rust](https://img.shields.io/badge/rust-stable-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/) [![Bevy](https://img.shields.io/badge/Bevy-0.19-blueviolet)](https://bevyengine.org/) [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey)](https://github.com/YaogoGerard/cymatrox-viewer#packaging--releases)
+
+</div>
 
 Interactive cymatics laboratory written in Rust. Visualizes two wave phenomena — granular (Chladni patterns) and fluid (Faraday waves) — with the sand driven by the GPU-accelerated [cymatrox](https://github.com/YaogoGerard/cymatrox) simulation crate and both modules rendered in real-time with [Bevy](https://bevyengine.org/).
 
@@ -11,7 +15,7 @@ Interactive cymatics laboratory written in Rust. Visualizes two wave phenomena �
 - **Interactive control panel**: egui UI to tweak solver/liquid parameters, frequency and driving amplitude.
 - **Voice control**: optional microphone FFT input to drive the frequency (pitch).
 - **Frame-rate independent pacing**: simulation runs at fixed physics steps per second regardless of render FPS.
-- **Production-ready packaging**: deb/AppImage (Linux), NSIS installer (Windows), DMG (macOS, unsigned). Auto-update via `cargo-packager-updater` using GitHub Releases.
+- **Production-ready packaging**: deb/AppImage (Linux), NSIS installer (Windows), DMG (macOS, unsigned).
 - **Traced logging**: configurable with `RUST_LOG` (e.g. `RUST_LOG=info,cymatrox_viewer=debug`).
 
 ## Building
@@ -45,9 +49,9 @@ cargo fmt --all -- --check
 
 ## Packaging & Releases
 
-Packaging is configured via [`Packager.toml`](./Packager.toml) and [`cargo-packager`](https://github.com/crabnebula-dev/cargo-packager). On tagged releases (`v*.*.*`), the GitHub Actions workflow builds for Linux (deb/AppImage), Windows (NSIS), and macOS (x86_64 + aarch64, DMG unsigned).
+Packaging is configured through the `[package.metadata.packager]` table in [`Cargo.toml`](./Cargo.toml) and [`cargo-packager`](https://github.com/crabnebula-dev/cargo-packager). On tagged releases (`v*.*.*`), the GitHub Actions workflow builds each target with `cargo build --release --target …` and writes the installers to `dist/`: **deb + AppImage** (Linux), **NSIS** (Windows), and **DMG** (macOS x86_64 + aarch64, unsigned).
 
-Auto-update uses `cargo-packager-updater` pointing to `https://github.com/YaogoGerard/cymatrox-viewer/releases/latest/download/latest.json`. On Windows/macOS/Linux (AppImage), the updater can download and install updates automatically; `.deb` packages are installed via the system package manager.
+Auto-update is not wired up yet: producing `cargo-packager-updater` artifacts needs a signing key (`CARGO_PACKAGER_SIGN_PRIVATE_KEY`) and updater metadata, which are not configured.
 
 ## macOS note
 
